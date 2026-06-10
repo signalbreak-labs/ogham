@@ -63,10 +63,10 @@ fn prefix_to_char_boundary(s: &str, max: usize) -> &str {
 }
 
 /// Classify one message. Precedence (first match wins):
-/// 1. metadata[AGENT_CONTENT_TYPE] if present and parseable
+/// 1. `metadata[AGENT_CONTENT_TYPE]` if present and parseable
 /// 2. role == "system" -> SystemInstruction
 /// 3. role == "tool" or role == "function":
-///    metadata[TOOL_STATUS] == "error" -> ToolResultError
+///    `metadata[TOOL_STATUS] == "error"` -> ToolResultError
 ///    else if content matches ERROR_PATTERN -> ToolResultError
 ///    else -> ToolResultSuccess
 /// 4. role == "user" -> UserQuery

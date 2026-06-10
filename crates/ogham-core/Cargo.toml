@@ -6,7 +6,10 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 rust-version.workspace = true
-description = "Core traits and types for ogham"
+description = "Core traits and types for the Ogham LLM context engineering SDK"
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 async-trait = { workspace = true }

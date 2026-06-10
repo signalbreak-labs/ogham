@@ -13,10 +13,14 @@ license = "Apache-2.0"
 repository = "https://github.com/signalbreak-labs/ogham"
 authors = ["VerifiedOrganic"]
 rust-version = "1.85"
+readme = "README.md"
+keywords = ["llm", "context", "compression", "tokens", "agents"]
+categories = ["compression", "text-processing"]
 
 [workspace.dependencies]
-ogham-core = { path = "crates/ogham-core" }
-ogham = { path = "crates/ogham" }
+# Versions are required alongside paths so `cargo publish` works.
+ogham-core = { path = "crates/ogham-core", version = "0.1.0" }
+ogham = { path = "crates/ogham", version = "0.1.0" }
 
 async-trait = "0.1"
 bytes = "1"

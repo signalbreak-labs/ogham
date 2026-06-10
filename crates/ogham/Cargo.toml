@@ -6,7 +6,10 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 rust-version.workspace = true
-description = "Pure-Rust context and token compression library"
+description = "LLM context engineering SDK: reversible compression, agent-aware rules, token budgets"
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [features]
 default = []

@@ -6,7 +6,10 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 rust-version.workspace = true
-description = "Optional Axum MCP server for ogham"
+description = "Embeddable HTTP server for the Ogham context engineering SDK"
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [[bin]]
 name = "ogham-server"

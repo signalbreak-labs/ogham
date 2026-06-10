@@ -13,7 +13,7 @@ pub enum CacheStrategy {
 
 /// Annotate breakpoints. Returns how many breakpoints were set.
 ///
-/// Anthropic: set metadata[CACHE_CONTROL] = "ephemeral" on (in priority order,
+/// Anthropic: set `metadata[CACHE_CONTROL] = "ephemeral"` on (in priority order,
 /// skipping duplicates, max 4):
 ///   1. the LAST message with role == "system"
 ///   2. the message immediately BEFORE the last `stable_suffix` messages
