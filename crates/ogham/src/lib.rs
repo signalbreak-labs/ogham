@@ -63,9 +63,11 @@ pub mod conversation;
 pub mod detect;
 pub mod memory;
 pub mod pipeline;
+pub mod providers;
 pub mod stats_math;
 pub mod token_counter;
 pub mod token_est;
+pub mod tools;
 
 pub use ogham_core::*;
 pub use token_counter::{HeuristicCounter, counter_for_model};

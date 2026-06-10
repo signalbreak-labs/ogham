@@ -63,6 +63,10 @@ pub mod meta_keys {
     pub const TOOL_STATUS: &str = "ogham.tool_status";
     /// Name of the tool that produced a tool message.
     pub const TOOL_NAME: &str = "ogham.tool_name";
+    /// Provider tool-call id linking an assistant tool call to its result
+    /// message(s). Hosts should set it on both sides; Ogham uses message
+    /// adjacency for pair safety, but the tag makes audits and tests exact.
+    pub const TOOL_CALL_ID: &str = "ogham.tool_call_id";
     /// CCR id of the original content, when this message was compressed/cleared.
     pub const CCR_ID: &str = "ogham.ccr_id";
     /// "ephemeral" — provider-cache breakpoint marker (WP-7 writes this).

@@ -35,9 +35,9 @@ Ogham is distributed via GitHub (not yet on crates.io):
 
 ```toml
 [dependencies]
-ogham = { git = "https://github.com/signalbreak-labs/ogham", tag = "v0.1.0" }
+ogham = { git = "https://github.com/signalbreak-labs/ogham", tag = "v0.2.0" }
 # exact OpenAI token counting:
-# ogham = { git = "https://github.com/signalbreak-labs/ogham", tag = "v0.1.0", features = ["tiktoken"] }
+# ogham = { git = "https://github.com/signalbreak-labs/ogham", tag = "v0.2.0", features = ["tiktoken"] }
 ```
 
 Prebuilt `ogham-server` binaries (Linux, macOS universal, Windows; sha256 checksums) are on the
@@ -129,7 +129,7 @@ appear once the crates are published to crates.io).
 
 ## Status
 
-`0.1.0` — APIs may change before 1.0 (semver-minor may break). The test
+`0.2.0` — APIs may change before 1.0 (semver-minor may break). The test
 suite covers fail-closed behavior, determinism, fuzzing, golden-file
 regression, and needle-in-haystack survival probes; see
 [CONTRIBUTING.md](CONTRIBUTING.md) for the gate every change must pass.

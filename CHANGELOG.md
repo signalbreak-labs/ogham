@@ -7,6 +7,34 @@ versions may contain breaking changes).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-10
+
+Informed by a June 2026 state-of-the-art review (Anthropic context editing,
+ACON, Hermes/Claude Code production patterns).
+
+### Added
+
+- **Pair-safe dropping**: the budget cascade's `drop_old` step now removes
+  an assistant tool call and its consecutive tool results as one atomic
+  group — provider APIs reject orphaned tool results. A protected tool
+  result (error or pinned) now also protects the assistant message that
+  invoked it. The conversation summarize-band boundary is aligned the same
+  way so draining old turns can never split a pair.
+- **Anthropic server-side context editing adapter**
+  (`ogham::providers::anthropic`): translates an `AgentPolicy` into the
+  `context_management` / `clear_tool_uses_20250919` request fragment
+  (beta header `context-management-2025-06-27`), so Claude-targeting hosts
+  can delegate first-line clearing to the platform while Ogham covers
+  other providers, reversibility, budgets, and summaries.
+- **Agent-facing retrieval tool** (`ogham::tools`):
+  `retrieve_tool_definition()` (provider-agnostic JSON Schema) and
+  `handle_retrieve_call()` — a dispatcher that always returns
+  model-readable text (content, not-found, or error notice) and never
+  errors the agent loop. Tolerates being passed a full `<<ccr:HASH>>`
+  marker instead of the bare hash.
+- `meta_keys::TOOL_CALL_ID` (`ogham.tool_call_id`) for linking tool calls
+  to their results in audits and tests.
+
 ## [0.1.0] - 2026-06-10
 
 Initial release.
@@ -49,5 +77,6 @@ Design substantially derived from
 [Headroom](https://github.com/chopratejas/headroom) (Apache-2.0) — see
 [NOTICE](NOTICE).
 
-[Unreleased]: https://github.com/signalbreak-labs/ogham/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/signalbreak-labs/ogham/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/signalbreak-labs/ogham/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/signalbreak-labs/ogham/releases/tag/v0.1.0

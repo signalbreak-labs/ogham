@@ -61,7 +61,10 @@ pub async fn compress_conversation_history(
 
     // Split into bands: [old..middle..recent]
     let recent_start = messages.len().saturating_sub(config.preserve_recent);
-    let middle_start = recent_start.saturating_sub(config.compress_middle);
+    let middle_start = align_band_start(
+        messages,
+        recent_start.saturating_sub(config.compress_middle),
+    );
 
     let mut stats = ConversationStats::default();
 
@@ -123,7 +126,10 @@ pub async fn compress_conversation_history_with_summarizer(
     }
 
     let recent_start = messages.len().saturating_sub(config.preserve_recent);
-    let middle_start = recent_start.saturating_sub(config.compress_middle);
+    let middle_start = align_band_start(
+        messages,
+        recent_start.saturating_sub(config.compress_middle),
+    );
 
     let mut stats = ConversationStats::default();
 
@@ -184,6 +190,19 @@ pub async fn compress_conversation_history_with_summarizer(
     stats.total_turns_after = messages.len();
 
     Ok(stats)
+}
+
+/// Move a band-start index backward so it never lands on a tool-role
+/// message. Draining a prefix that ends between an assistant tool call and
+/// its results would orphan the results — provider APIs reject that.
+fn align_band_start(messages: &[Message], mut idx: usize) -> usize {
+    while idx > 0
+        && idx < messages.len()
+        && (messages[idx].role == "tool" || messages[idx].role == "function")
+    {
+        idx -= 1;
+    }
+    idx
 }
 
 /// Truncate to at most `max` bytes without splitting a UTF-8 char.

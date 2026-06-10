@@ -13,6 +13,7 @@ using namespaced keys defined in `ogham_core::meta_keys`:
 | `AGENT_CONTENT_TYPE` | `ogham.agent_content_type` | explicit classification override (snake_case `AgentContentType` name) |
 | `TOOL_STATUS` | `ogham.tool_status` | `"success"` or `"error"` for tool-result messages |
 | `TOOL_NAME` | `ogham.tool_name` | name of the tool that produced a result |
+| `TOOL_CALL_ID` | `ogham.tool_call_id` | provider call id linking an assistant tool call to its result(s) |
 | `CCR_ID` | `ogham.ccr_id` | content hash of the original, set when a message is cleared |
 | `CACHE_CONTROL` | `ogham.cache_control` | `"ephemeral"` — provider cache breakpoint |
 | `PINNED` | `ogham.pinned` | `"true"` — never compress, clear, summarize, or drop |
@@ -105,9 +106,14 @@ The cascade runs until the history fits, escalating cheap → lossy:
 | `drop_old` | remove oldest droppable messages one at a time |
 
 `drop_old` never removes system instructions, tool errors, the most recent
-user message, or pinned messages. If the history still doesn't fit,
-`enforce_budget` returns `OghamError::BudgetExceeded { needed, limit }` —
-treat that as "do not send this prompt."
+user message, or pinned messages — and it drops in **pair-safe groups**: an
+assistant message and the consecutive tool-role messages that follow it are
+removed atomically, never split. Provider APIs reject orphaned tool results,
+so a protected tool result (an error, or pinned) also protects the assistant
+message that invoked it. The summarize band boundary is aligned the same way.
+If the history still doesn't fit, `enforce_budget` returns
+`OghamError::BudgetExceeded { needed, limit }` — treat that as "do not send
+this prompt."
 
 `safety_margin: None` means: 0% when the counter is exact, 5% otherwise
 (Claude counts are estimates — see [compression.md](compression.md#token-counting)).
@@ -181,6 +187,43 @@ limit): the last system message, and the end of the stable prefix.
 `CacheStrategy::OpenAi` / `Generic` remove any annotations (those providers
 cache prefixes automatically) — pair with `align_messages` for byte-stable
 prefixes either way.
+
+## The retrieval tool
+
+For the model to dereference `<<ccr:HASH>>` markers, expose the built-in
+retrieval tool:
+
+```rust
+use ogham::tools::{retrieve_tool_definition, handle_retrieve_call};
+
+// advertise to the model (Anthropic shape; for OpenAI move input_schema
+// into a function.parameters field)
+let tools = vec![retrieve_tool_definition()];
+
+// when the model calls "ogham_retrieve":
+let text = handle_retrieve_call(&call_args, ccr.as_ref()).await;
+// always returns model-readable text — found content, a not-found notice,
+// or an error notice. It never errors the agent loop.
+```
+
+## Delegating to Anthropic's server-side clearing
+
+If your host targets the Claude API, Anthropic can clear old tool results
+server-side (beta). Ogham translates its policy into that wire format so the
+platform handles first-line clearing and Ogham covers everything else
+(other providers, reversible CCR, budgets, summaries):
+
+```rust
+use ogham::providers::anthropic::{AnthropicContextEditing, BETA_HEADER};
+
+let cfg = AnthropicContextEditing::from_policy(&policy, 100_000);
+// request header:  anthropic-beta: {BETA_HEADER}
+// request body:    "context_management": cfg.to_request_fragment()
+```
+
+Caveats vs. Ogham's own clearing: the server-side version is **irreversible**
+(no CCR), Claude-only, and has no content-based error detection — list
+error-prone tools in `exclude_tools`.
 
 ## Putting it together
 

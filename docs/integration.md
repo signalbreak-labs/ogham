@@ -43,10 +43,21 @@ Already running fjall? Share the keyspace instead of opening a second
 database — see `FjallCcrStore` constructors. Parallel agents sharing one
 store deduplicate automatically (keys are content hashes).
 
-**Expose retrieval to the model.** Register a tool (e.g.
-`ogham_retrieve(id)`) that calls `ccr.retrieve(id)`. The model will use it
-when a cleared result turns out to matter. Budget for retrievals: clearing
-saves tokens *net of* the occasional re-fetch.
+**Expose retrieval to the model.** Use the built-in definition and
+dispatcher — `ogham::tools::retrieve_tool_definition()` and
+`ogham::tools::handle_retrieve_call(args, ccr)` — so every host wires it
+identically. The model will use it when a cleared result turns out to
+matter. Budget for retrievals: clearing saves tokens *net of* the
+occasional re-fetch.
+
+**Tag tool-call pairs.** Set `meta_keys::TOOL_CALL_ID` on both the
+assistant message that makes a tool call and its result message(s). Ogham
+keeps pairs intact positionally either way, but the tag makes audits and
+tests exact.
+
+**On Claude, optionally delegate first-line clearing to the platform** via
+`ogham::providers::anthropic::AnthropicContextEditing` (see
+[agent-context.md](agent-context.md#delegating-to-anthropics-server-side-clearing)).
 
 ### 3. Compress at the message-assembly boundary
 
@@ -135,7 +146,7 @@ exact counters and 5% for estimates. Enable the `tiktoken` feature for exact
 OpenAI counts:
 
 ```toml
-ogham = { version = "0.1", features = ["tiktoken"] }
+ogham = { git = "https://github.com/signalbreak-labs/ogham", tag = "v0.2.0", features = ["tiktoken"] }
 ```
 
 ## Configuration mapping example
