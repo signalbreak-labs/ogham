@@ -1,0 +1,80 @@
+
+use std::sync::Arc;
+
+pub mod pipeline;
+pub mod compressors;
+pub mod detect;
+
+pub struct CompressConfig {
+
+    pub reversible: bool,
+
+    pub use_cache_aligner: bool,
+
+    pub compressors: Vec<String>,
+}
+
+impl Default for CompressConfig {
+    fn default() -> Self {
+        Self {
+            reversible: true,
+            use_cache_aligner: false,
+            compressors: vec![
+                "smart_crusher".into(),
+                "ast_code".into(),
+                "log_stripper".into(),
+            ],
+        }
+    }
+}
+
+pub fn default_pipeline() -> pipeline::DefaultCompressionPipeline {
+    pipeline::DefaultCompressionPipeline::new(None, None)
+}
+
+pub fn pipeline_with_ccr(ccr_store: Arc<dyn crate::ccr::CcrStore>) -> pipeline::DefaultCompressionPipeline {
+    pipeline::DefaultCompressionPipeline::with_ccr_store(ccr_store)
+}
+
+pub async fn compress_messages(
+    messages: Vec<context_compress_core::Message>,
+    config: CompressConfig,
+) -> context_compress_core::Result<context_compress_core::CompressedMessages> {
+    let pipeline = default_pipeline();
+    pipeline.run(&messages).await
+}
+
+pub fn detect(content: &str) -> detect::DetectionResult {
+    detect::detect_content_type(content)
+}
+
+pub fn is_json_dict_array(content: &str) -> bool {
+    detect::is_json_array_of_dicts(content)
+}
+
+mod tests {
+    use super::*;
+
+    fn config_default_is_reversible() {
+        let cfg = CompressConfig::default();
+        assert!(cfg.reversible);
+    }
+
+    fn detect_plain_text() {
+        let result = detect("hello world");
+        assert_eq!(result.content_type.as_str(), "plain_text");
+    }
+
+    fn detect_json_array() {
+        let result = detect("[{\"a\":1}]");
+        assert_eq!(result.content_type.as_str(), "json_array");
+    }
+
+    fn is_json_dict_array_true() {
+        assert!(is_json_dict_array("[{\"a\":1},{\"b\":2}]"));
+    }
+
+    fn is_json_dict_array_false() {
+        assert!(!is_json_dict_array("[1,2,3]"));
+    }
+}

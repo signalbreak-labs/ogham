@@ -1,0 +1,41 @@
+[package]
+name = "ogham"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Pure-Rust context and token compression library"
+
+[features]
+default = []
+tiktoken = ["dep:tiktoken-rs"]
+
+[dependencies]
+ogham-core = { workspace = true }
+
+async-trait = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+tiktoken-rs = { version = "0.7", optional = true }
+
+fjall = "2"
+regex = "1"
+aho-corasick = "1"
+md5 = "0.7"
+flate2 = "1"
+rusqlite = { version = "0.34", features = ["bundled"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
+criterion = { version = "0.5", default-features = false }
+
+[[bench]]
+name = "compress"
+harness = false
