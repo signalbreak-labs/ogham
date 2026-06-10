@@ -40,7 +40,7 @@ ogham = { git = "https://github.com/signalbreak-labs/ogham", tag = "v0.1.0" }
 # ogham = { git = "https://github.com/signalbreak-labs/ogham", tag = "v0.1.0", features = ["tiktoken"] }
 ```
 
-Prebuilt `ogham-server` binaries (5 platforms, sha256 checksums) are on the
+Prebuilt `ogham-server` binaries (Linux, macOS universal, Windows; sha256 checksums) are on the
 [releases page](https://github.com/signalbreak-labs/ogham/releases).
 
 ## Sixty seconds

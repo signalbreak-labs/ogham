@@ -49,8 +49,8 @@ tag v0.2.0
    │
    ├─ verify ............ tag == workspace version, full gate
    └─ create-release .... GitHub release, notes from CHANGELOG.md
-        └─ binaries ..... ogham-server for 5 targets + sha256 checksums
-                          (linux x86_64/aarch64, macOS x86_64/aarch64,
+        └─ binaries ..... ogham-server for 4 targets + sha256 checksums
+                          (linux x86_64/aarch64, macOS universal,
                            windows x86_64)
 ```
 
