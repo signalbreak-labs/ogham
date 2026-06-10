@@ -11,7 +11,7 @@ cargo test --workspace
 cargo test -p ogham --features tiktoken
 ```
 
-CI runs the same gate on Linux, macOS, and Windows, plus an MSRV (1.85)
+CI runs the same gate on Linux, macOS, and Windows, plus an MSRV (1.95)
 check and `cargo doc` with warnings denied.
 
 ## Hard rules
