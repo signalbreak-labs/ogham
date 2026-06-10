@@ -80,7 +80,7 @@ jobs:
         with:
           bin: ogham-server
           target: ${{ matrix.target }}
-          archive: ogham-server-$version-$target
+          archive: ogham-server-$tag-$target
           checksum: sha256
           token: ${{ secrets.GITHUB_TOKEN }}
 
