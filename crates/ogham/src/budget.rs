@@ -132,10 +132,10 @@ pub async fn enforce_budget(
             ) {
                 return false;
             }
-            if let Some(idx) = latest_user_idx {
-                if i == idx {
-                    return false;
-                }
+            if let Some(idx) = latest_user_idx
+                && i == idx
+            {
+                return false;
             }
             if m.metadata.get(ogham_core::meta_keys::PINNED) == Some(&"true".to_string()) {
                 return false;

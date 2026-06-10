@@ -170,31 +170,30 @@ pub async fn apply_agent_compression(
                     stats.tool_results_kept_raw += 1;
                     continue;
                 }
-                if policy.clear_old_tool_results {
-                    if let Some(ref store) = ccr {
-                        let hash = crate::ccr::compute_key(msg.content.as_bytes());
-                        if store.save(&hash, &msg.content, None).await.is_ok() {
-                            let tool_name = msg
-                                .metadata
-                                .get(meta_keys::TOOL_NAME)
-                                .cloned()
-                                .unwrap_or_else(|| "unknown".to_string());
-                            let n =
-                                crate::token_counter::HeuristicCounter::new().count(&msg.content);
-                            msg.content = format!(
-                                "[tool:{tool_name}] result cleared ({n} tokens) — original retrievable via <<ccr:{hash}>>"
-                            );
-                            msg.metadata.insert(meta_keys::CCR_ID.to_string(), hash);
-                            msg.metadata.insert(
-                                meta_keys::AGENT_CONTENT_TYPE.to_string(),
-                                "tool_result_success".to_string(),
-                            );
-                            stats.tool_results_cleared += 1;
-                        }
-                        // On Err, leave message unchanged (fail-closed).
+                if policy.clear_old_tool_results
+                    && let Some(ref store) = ccr
+                {
+                    let hash = crate::ccr::compute_key(msg.content.as_bytes());
+                    if store.save(&hash, &msg.content, None).await.is_ok() {
+                        let tool_name = msg
+                            .metadata
+                            .get(meta_keys::TOOL_NAME)
+                            .cloned()
+                            .unwrap_or_else(|| "unknown".to_string());
+                        let n = crate::token_counter::HeuristicCounter::new().count(&msg.content);
+                        msg.content = format!(
+                            "[tool:{tool_name}] result cleared ({n} tokens) — original retrievable via <<ccr:{hash}>>"
+                        );
+                        msg.metadata.insert(meta_keys::CCR_ID.to_string(), hash);
+                        msg.metadata.insert(
+                            meta_keys::AGENT_CONTENT_TYPE.to_string(),
+                            "tool_result_success".to_string(),
+                        );
+                        stats.tool_results_cleared += 1;
                     }
-                    // If ccr is None, clearing is skipped (fail-closed).
+                    // On Err, leave message unchanged (fail-closed).
                 }
+                // If ccr is None, clearing is skipped (fail-closed).
             }
         }
     }

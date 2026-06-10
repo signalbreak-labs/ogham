@@ -153,17 +153,15 @@ fn crush_string_array(
     }
     let lengths: Vec<f64> = items.iter().map(|s| s.chars().count() as f64).collect();
     let mut anomaly_indices: BTreeSet<usize> = BTreeSet::new();
-    if lengths.len() > 1 {
-        if let Some(mean_len) = stats_math::mean(&lengths) {
-            if let Some(std_len) = stats_math::sample_stdev(&lengths) {
-                if std_len > 0.0 {
-                    let threshold = config.variance_threshold * std_len;
-                    for (i, &length) in lengths.iter().enumerate() {
-                        if (length - mean_len).abs() > threshold {
-                            anomaly_indices.insert(i);
-                        }
-                    }
-                }
+    if lengths.len() > 1
+        && let Some(mean_len) = stats_math::mean(&lengths)
+        && let Some(std_len) = stats_math::sample_stdev(&lengths)
+        && std_len > 0.0
+    {
+        let threshold = config.variance_threshold * std_len;
+        for (i, &length) in lengths.iter().enumerate() {
+            if (length - mean_len).abs() > threshold {
+                anomaly_indices.insert(i);
             }
         }
     }
@@ -246,10 +244,10 @@ fn crush_number_array(
     if std_val > 0.0 {
         let threshold = config.variance_threshold * std_val;
         for (i, val) in items.iter().enumerate() {
-            if let Some(num) = val.as_f64().filter(|f| f.is_finite()) {
-                if (num - mean_val).abs() > threshold {
-                    outlier_indices.insert(i);
-                }
+            if let Some(num) = val.as_f64().filter(|f| f.is_finite())
+                && (num - mean_val).abs() > threshold
+            {
+                outlier_indices.insert(i);
             }
         }
     }
@@ -691,10 +689,10 @@ impl SmartCrusher {
                     let (crushed, _) = crush_string_array(&strs, &self.config, bias);
                     let crushed_set: HashSet<&str> = crushed.iter().map(|s| s.as_str()).collect();
                     for (i, idx) in indices.iter().enumerate() {
-                        if let Some(s) = values[i].as_str() {
-                            if crushed_set.contains(s) {
-                                keep_indices.insert(*idx);
-                            }
+                        if let Some(s) = values[i].as_str()
+                            && crushed_set.contains(s)
+                        {
+                            keep_indices.insert(*idx);
                         }
                     }
                     strategy_parts.push(format!("str:{}->{}", values.len(), crushed.len()));
@@ -713,19 +711,17 @@ impl SmartCrusher {
                         .iter()
                         .filter_map(|v| v.as_f64().filter(|f| f.is_finite()))
                         .collect();
-                    if finite.len() > 1 {
-                        if let Some(mean_v) = stats_math::mean(&finite) {
-                            if let Some(std_v) = stats_math::sample_stdev(&finite) {
-                                if std_v > 0.0 {
-                                    let threshold = self.config.variance_threshold * std_v;
-                                    for (i, val) in values.iter().enumerate() {
-                                        if let Some(num) = val.as_f64().filter(|f| f.is_finite()) {
-                                            if (num - mean_v).abs() > threshold {
-                                                keep_indices.insert(indices[i]);
-                                            }
-                                        }
-                                    }
-                                }
+                    if finite.len() > 1
+                        && let Some(mean_v) = stats_math::mean(&finite)
+                        && let Some(std_v) = stats_math::sample_stdev(&finite)
+                        && std_v > 0.0
+                    {
+                        let threshold = self.config.variance_threshold * std_v;
+                        for (i, val) in values.iter().enumerate() {
+                            if let Some(num) = val.as_f64().filter(|f| f.is_finite())
+                                && (num - mean_v).abs() > threshold
+                            {
+                                keep_indices.insert(indices[i]);
                             }
                         }
                     }
@@ -776,15 +772,15 @@ impl Compressor for SmartCrusher {
         } else {
             format!("sc-{}", compute_key(content.data.as_ref()))
         };
-        if ctx.reversible {
-            if let Some(store) = &self.ccr_store {
-                let store_ref = store.clone();
-                let id_clone = id.clone();
-                let text_clone = text.to_string();
-                tokio::spawn(async move {
-                    let _ = store_ref.save(&id_clone, &text_clone, None).await;
-                });
-            }
+        if ctx.reversible
+            && let Some(store) = &self.ccr_store
+        {
+            let store_ref = store.clone();
+            let id_clone = id.clone();
+            let text_clone = text.to_string();
+            tokio::spawn(async move {
+                let _ = store_ref.save(&id_clone, &text_clone, None).await;
+            });
         }
         Ok(Compressed {
             id,

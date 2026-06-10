@@ -20,7 +20,7 @@ fn build_json_array(size_kb: usize) -> String {
     while total < size_kb * 1024 {
         let item = format!(
             r#"{{"id":{i},"name":"item_{i}","status":"{}","latency_ms":{},"region":"us-east-1"}}"#,
-            if i % 97 == 0 { "failed" } else { "ok" },
+            if i.is_multiple_of(97) { "failed" } else { "ok" },
             (i * 37) % 500,
         );
         total += item.len() + 1;
