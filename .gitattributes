@@ -1,0 +1,4 @@
+* text=auto eol=lf
+
+# Golden fixtures are byte-exact test data — never convert line endings.
+crates/ogham/tests/golden/** -text
