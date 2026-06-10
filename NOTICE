@@ -1,0 +1,49 @@
+Ogham
+Copyright 2026 VerifiedOrganic
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this software except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+This product includes software developed by the Ogham contributors.
+
+================================================================================
+Derived and inspired work
+================================================================================
+
+Headroom
+  Copyright 2025 Headroom Contributors
+  Licensed under the Apache License, Version 2.0
+  https://github.com/chopratejas/headroom
+
+  Ogham's design is substantially derived from Headroom: the reversible
+  CCR (Content-Compress-Retrieve) store and marker scheme, content-type
+  routing, and the SmartCrusher and LogStripper compressor designs
+  originate there. The Rust implementation in this repository was written
+  independently for Ogham.
+
+Microsoft LLMLingua / LLMLingua-2 / LongLLMLingua
+  https://llmlingua.com
+  Semantic scoring and perplexity-based compression concepts.
+
+Additional inspiration: RTK (Rust Token Killer), Claw Compactor,
+steno/deemuk, llm-token-saver-rs, sqz, TOON, and the research literature
+on selective context and agent context optimization (SAC, Selective
+Context, Acon).
+
+================================================================================
+Third-party software (optional dependencies)
+================================================================================
+
+tiktoken-rs (enabled via the "tiktoken" feature)
+  Licensed under the MIT License
+  https://github.com/zurawiki/tiktoken-rs
+  A Rust port of OpenAI's tiktoken
+  (Copyright (c) 2022 OpenAI, Shantanu Jain — MIT License,
+  https://github.com/openai/tiktoken).
+
+Other Rust dependencies (serde, tokio, axum, fjall, rusqlite, regex, etc.)
+are used under their respective MIT/Apache-2.0 licenses; see each crate's
+metadata for details.

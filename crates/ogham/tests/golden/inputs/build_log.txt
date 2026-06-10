@@ -1,0 +1,116 @@
+2026-06-10T09:00:01Z INFO  [build] Starting build for project context-compress
+2026-06-10T09:00:02Z INFO  [build] Cleaning target directory
+2026-06-10T09:00:03Z INFO  [build] Resolving dependencies
+2026-06-10T09:00:04Z INFO  [build] Downloading crates
+2026-06-10T09:00:05Z INFO  [build] Compiling context-compress-core v0.1.0
+2026-06-10T09:00:06Z INFO  [build] Compiling context-compress v0.1.0
+2026-06-10T09:00:07Z INFO  [build] Running rustc
+2026-06-10T09:00:08Z INFO  [build] Linking binaries
+2026-06-10T09:00:09Z WARN  [build] Deprecated feature used in Cargo.toml
+2026-06-10T09:00:10Z INFO  [build] Build succeeded
+2026-06-10T09:00:11Z INFO  [test] Starting test suite
+2026-06-10T09:00:12Z INFO  [test] Running unit tests
+2026-06-10T09:00:13Z INFO  [test] test_cache_aligner::test_align_empty passed
+2026-06-10T09:00:14Z INFO  [test] test_cache_aligner::test_align_messages passed
+2026-06-10T09:00:15Z INFO  [test] test_cache_aligner::test_align_json_sorts_keys passed
+2026-06-10T09:00:16Z INFO  [test] test_cache_aligner::test_align_json_recursive passed
+2026-06-10T09:00:17Z INFO  [test] test_cache_aligner::test_collapse_whitespace passed
+2026-06-10T09:00:18Z INFO  [test] test_cache_aligner::test_plain_text_unchanged_semantically passed
+2026-06-10T09:00:19Z INFO  [test] Running pipeline tests
+2026-06-10T09:00:20Z INFO  [test] test_pipeline::add_compressor_never_drops passed
+2026-06-10T09:00:21Z INFO  [test] test_pipeline::get_compressor_unknown_returns_none passed
+2026-06-10T09:00:22Z INFO  [test] test_pipeline::ccr_stats_not_fabricated passed
+2026-06-10T09:00:23Z INFO  [test] Running compressor tests
+2026-06-10T09:00:24Z INFO  [test] test_compressors::smart_crusher_compresses_json passed
+2026-06-10T09:00:25Z INFO  [test] test_compressors::log_stripper_detects_pytest passed
+2026-06-10T09:00:26Z INFO  [test] test_compressors::ast_code_preserves_imports passed
+2026-06-10T09:00:27Z INFO  [test] test_compressors::semantic_deduplicates_paragraphs passed
+2026-06-10T09:00:28Z INFO  [test] test_compressors::toon_collapses_plain_text passed
+2026-06-10T09:00:29Z INFO  [test] Running conversation tests
+2026-06-10T09:00:30Z INFO  [test] test_conversation::test_no_compression_needed passed
+2026-06-10T09:00:31Z INFO  [test] test_conversation::test_middle_compression passed
+2026-06-10T09:00:32Z INFO  [test] test_conversation::test_old_summary passed
+2026-06-10T09:00:33Z INFO  [test] test_conversation::test_summary_multibyte_no_panic passed
+2026-06-10T09:00:34Z INFO  [test] Running agent tests
+2026-06-10T09:00:35Z INFO  [test] test_agent::classify_precedence_metadata_wins passed
+2026-06-10T09:00:36Z INFO  [test] test_agent::classify_tool_error_by_content passed
+2026-06-10T09:00:37Z INFO  [test] test_agent::errors_never_cleared passed
+2026-06-10T09:00:38Z INFO  [test] test_agent::recent_tool_results_kept_raw passed
+2026-06-10T09:00:39Z INFO  [test] test_agent::cleared_content_roundtrip passed
+2026-06-10T09:00:40Z INFO  [test] test_agent::no_ccr_store_means_no_clearing passed
+2026-06-10T09:00:41Z INFO  [test] test_agent::pinned_never_cleared passed
+2026-06-10T09:00:42Z INFO  [test] test_agent::system_and_user_untouched passed
+2026-06-10T09:00:43Z INFO  [test] Running budget tests
+2026-06-10T09:00:44Z INFO  [test] test_budget::under_budget_is_noop passed
+2026-06-10T09:00:45Z INFO  [test] test_budget::agent_rules_sufficient passed
+2026-06-10T09:00:46Z INFO  [test] test_budget::cascade_reaches_drop passed
+2026-06-10T09:00:47Z INFO  [test] test_budget::budget_exceeded_errors passed
+2026-06-10T09:00:48Z INFO  [test] test_budget::errors_survive_cascade passed
+2026-06-10T09:00:49Z INFO  [test] test_budget::safety_margin_applied passed
+2026-06-10T09:00:50Z INFO  [test] Running memory tests
+2026-06-10T09:00:51Z INFO  [test] test_memory::extracts_files_sorted_deduped passed
+2026-06-10T09:00:52Z INFO  [test] test_memory::extracts_errors_verbatim passed
+2026-06-10T09:00:53Z INFO  [test] test_memory::render_markdown_sections passed
+2026-06-10T09:00:54Z INFO  [test] test_memory::merge_is_idempotent passed
+2026-06-10T09:00:55Z INFO  [test] test_memory::summarizer_deterministic passed
+2026-06-10T09:00:56Z INFO  [test] Running cache strategy tests
+2026-06-10T09:00:57Z INFO  [test] test_cache_strategy::anthropic_sets_system_breakpoint passed
+2026-06-10T09:00:58Z INFO  [test] test_cache_strategy::anthropic_max_two_distinct passed
+2026-06-10T09:00:59Z INFO  [test] test_cache_strategy::openai_strips_annotations passed
+2026-06-10T09:01:00Z INFO  [test] test_cache_strategy::empty_messages_ok passed
+2026-06-10T09:01:01Z INFO  [test] Running server tests
+2026-06-10T09:01:02Z INFO  [test] test_server::health_ok passed
+2026-06-10T09:01:03Z INFO  [test] test_server::compress_roundtrip passed
+2026-06-10T09:01:04Z INFO  [test] test_server::retrieve_missing_is_found_false passed
+2026-06-10T09:01:05Z INFO  [test] test_server::detect_json passed
+2026-06-10T09:01:06Z INFO  [test] Running fuzz tests
+2026-06-10T09:01:07Z INFO  [test] fuzz_smart_crusher passed
+2026-06-10T09:01:08Z INFO  [test] fuzz_log_stripper passed
+2026-06-10T09:01:09Z INFO  [test] fuzz_ast_code passed
+2026-06-10T09:01:10Z INFO  [test] fuzz_semantic passed
+2026-06-10T09:01:11Z INFO  [test] fuzz_dedup_ref passed
+2026-06-10T09:01:12Z INFO  [test] fuzz_toon passed
+2026-06-10T09:01:13Z INFO  [test] fuzz_random_bytes_smart_crusher passed
+2026-06-10T09:01:14Z INFO  [test] fuzz_random_bytes_log_stripper passed
+2026-06-10T09:01:15Z INFO  [test] Running llm_safety tests
+2026-06-10T09:01:16Z INFO  [test] round_trip_json_array_via_ccr passed
+2026-06-10T09:01:17Z INFO  [test] round_trip_build_log_via_ccr passed
+2026-06-10T09:01:18Z INFO  [test] deterministic_output_same_input passed
+2026-06-10T09:01:19Z INFO  [test] fail_closed_returns_original passed
+2026-06-10T09:01:20Z INFO  [test] observer_fires_expected_events passed
+2026-06-10T09:01:21Z INFO  [test] system_message_preserved passed
+2026-06-10T09:01:22Z INFO  [test] cache_alignment_preserves_semantics passed
+2026-06-10T09:01:23Z INFO  [test] conversation_compression_preserves_recent_turns passed
+2026-06-10T09:01:24Z INFO  [test] source_code_retains_line_structure passed
+2026-06-10T09:01:25Z INFO  [test] git_diff_retains_hunk_headers passed
+2026-06-10T09:01:26Z INFO  [test] json_array_remains_valid_json passed
+2026-06-10T09:01:27Z INFO  [test] compressed_not_larger_than_original passed
+2026-06-10T09:01:28Z INFO  [test] pipeline_preserves_metadata passed
+2026-06-10T09:01:29Z INFO  [test] Running golden tests
+2026-06-10T09:01:30Z INFO  [test] golden_json_array passed
+2026-06-10T09:01:31Z INFO  [test] golden_build_log passed
+2026-06-10T09:01:32Z INFO  [test] golden_source_code passed
+2026-06-10T09:01:33Z INFO  [test] golden_git_diff passed
+2026-06-10T09:01:34Z INFO  [test] golden_prose passed
+2026-06-10T09:01:35Z INFO  [test] Running probe tests
+2026-06-10T09:01:36Z INFO  [test] error_trace_present passed
+2026-06-10T09:01:37Z INFO  [test] file_path_present passed
+2026-06-10T09:01:38Z INFO  [test] decision_line_present passed
+2026-06-10T09:01:39Z INFO  [test] next_step_present passed
+2026-06-10T09:01:40Z INFO  [test] Running benchmark compilation check
+2026-06-10T09:01:41Z ERROR [build] Compilation failed in workspace crate context-compress-server
+2026-06-10T09:01:42Z ERROR [build] stderr: error: linking with `cc` failed: exit code 1
+2026-06-10T09:01:43Z ERROR [build] Traceback (most recent call last):
+2026-06-10T09:01:44Z ERROR [build]   File "/Users/recursive/workspace/brehon/.venv/lib/python3.11/site-packages/setuptools/command/build_py.py", line 153, in run
+2026-06-10T09:01:45Z ERROR [build]     self.build_package_sources(pkg, 100000)
+2026-06-10T09:01:46Z ERROR [build]     self.build_package_sources(pkg, 99999)
+2026-06-10T09:01:47Z ERROR [build]     self.build_package_sources(pkg, 99998)
+2026-06-10T09:01:48Z ERROR [build] RustBuildError: compilation failed
+2026-06-10T09:01:49Z ERROR [build] Compilation failed in workspace crate context-compress-server
+2026-06-10T09:01:50Z ERROR [build] stderr: error: linking with `cc` failed: exit code 1
+2026-06-10T09:01:51Z ERROR [build] RustBuildError: compilation failed
+2026-06-10T09:01:52Z ERROR [build] Compilation failed in workspace crate context-compress-server
+2026-06-10T09:01:53Z ERROR [build] RustBuildError: compilation (final retry) failed
+2026-06-10T09:01:54Z INFO  [deploy] Deploy stage skipped due to build failure
+2026-06-10T09:01:55Z INFO  [cleanup] Cleaning up temporary files
+2026-06-10T09:01:56Z INFO  [cleanup] Done

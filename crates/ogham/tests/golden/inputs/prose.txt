@@ -1,0 +1,9 @@
+The quick brown fox jumps over the lazy dog. This sentence is famous for containing every letter of the English alphabet at least once. Typists use it to test keyboards and fonts. It has no special meaning beyond its pangram status.
+
+In the field of natural language processing, context windows are a precious resource. Large language models can only process a finite number of tokens per forward pass. When a conversation grows beyond this limit, the model loses access to early turns. Compression techniques aim to preserve semantic content while reducing token count.
+
+The quick brown fox jumps over the lazy dog. This sentence is famous for containing every letter of the English alphabet at least once. Typists use it to test keyboards and fonts. It has no special meaning beyond its pangram status.
+
+Deterministic compression offers several advantages over learned approaches. First, it requires no training data or GPU inference. Second, it is fully reproducible: the same input always yields the same output. Third, it is interpretable. When a compressor drops a paragraph or collapses whitespace, the transformation is easy to understand and audit.
+
+Finally, we consider the trade-off between compression ratio and information preservation. A 99 percent reduction that loses file paths and error messages is worse than a 70 percent reduction that keeps them. The goal is not minimal tokens but maximal task completion within the budget.

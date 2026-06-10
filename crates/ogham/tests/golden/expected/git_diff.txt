@@ -1,0 +1,70 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index 3a4f5c6..7b8e9d0 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -10,7 +10,7 @@ pub mod pipeline;
+ pub mod compressors;
+ pub mod detect;
+
+-
++
+
+ pub struct CompressConfig {
+
+@@ -45,8 +45,12 @@ pub async fn compress_messages(
+     pipeline.run(&messages).await
+ }
+
++
+ pub fn detect(content: &str) -> detect::DetectionResult {
+     detect::detect_content_type(content)
+ }
+
++
+ pub fn is_json_dict_array(content: &str) -> bool {
+     detect::is_json_array_of_dicts(content)
+ }
+
+diff --git a/src/pipeline.rs b/src/pipeline.rs
+index 1a2b3c4..5d6e7f8 100644
+--- a/src/pipeline.rs
++++ b/src/pipeline.rs
+@@ -28,7 +28,7 @@ pub struct DefaultCompressionPipeline {
+ impl DefaultCompressionPipeline {
+     pub fn new(metrics: Option<Arc<dyn Metrics>>, observer: Option<Arc<dyn Observer>>) -> Self {
+         Self {
+-            compressors: Arc::new(RwLock::new(Vec::new())),
++            compressors: Arc::new(std::sync::RwLock::new(Vec::new())),
+             ccr_store: None,
+             metrics: metrics.unwrap_or_else(|| Arc::new(NoopMetrics)),
+             observer: observer.unwrap_or_else(|| Arc::new(NoopObserver)),
+@@ -55,7 +55,7 @@ impl DefaultCompressionPipeline {
+
+     pub async fn register(&self, compressor: Box<dyn Compressor>) {
+-        let mut guard = self.compressors.write().await;
++        let mut guard = self.compressors.write().unwrap_or_else(|e| e.into_inner());
+         info!("registering compressor: {}", compressor.name());
+         guard.push(compressor);
+     }
+
+diff --git a/src/compressors/semantic.rs b/src/compressors/semantic.rs
+index 9a8b7c6..3d4e5f0 100644
+--- a/src/compressors/semantic.rs
++++ b/src/compressors/semantic.rs
+@@ -22,7 +22,7 @@ impl SemanticCompressor {
+         let paragraphs: Vec<&str> = text.split("\n\n").collect();
+         let mut seen: HashMap<String, usize> = HashMap::new();
+         let mut out: Vec<String> = Vec::new();
+-        let mut dup_count = 0;
++        let mut dup_count = 0usize;
+
+         for para in paragraphs {
+             let normalized = para.split_whitespace().collect::<Vec<_>>().join(" ");
+@@ -44,7 +44,7 @@ impl SemanticCompressor {
+             out.push(trimmed);
+         }
+
+-        if dup_count > 5 && !out.is_empty() {
++        if dup_count > 5 && !out.is_empty() {
+             out.push(format!("[{} duplicate paragraphs omitted]", dup_count));
+         }

@@ -1,0 +1,13 @@
+2026-06-10T09:00:01Z INFO  [build] Starting build for project context-compress
+2026-06-10T09:00:02Z INFO  [build] Cleaning target directory
+2026-06-10T09:00:03Z INFO  [build] Resolving dependencies
+2026-06-10T09:00:04Z INFO  [build] Downloading crates
+2026-06-10T09:00:05Z INFO  [build] Compiling context-compress-core v0.1.0
+2026-06-10T09:00:06Z INFO  [build] Compiling context-compress v0.1.0
+2026-06-10T09:00:07Z INFO  [build] Running rustc
+2026-06-10T09:00:08Z INFO  [build] Linking binaries
+2026-06-10T09:00:09Z WARN  [build] Deprecated feature used in Cargo.toml
+2026-06-10T09:00:10Z INFO  [build] Build succeeded
+2026-06-10T09:00:11Z INFO  [test] Starting test suite
+2026-06-10T09:00:12Z INFO  [test] Running unit tests
+2026-06-10T09:00:13Z INFO  [test] test_cache_aligner::test_align_empty pa... [truncated]

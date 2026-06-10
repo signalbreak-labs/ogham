@@ -1,0 +1,98 @@
+//! Main library entry point for the context-compress crate.
+//!
+//! This crate provides deterministic, rule-based compression for LLM
+//! conversation context. It is designed to be embeddable, fast, and
+//! safe: every compressor is fail-closed.
+
+use std::sync::Arc;
+
+pub mod pipeline;
+pub mod compressors;
+pub mod detect;
+
+/// Configuration for a compression run.
+#[derive(Debug, Clone)]
+pub struct CompressConfig {
+    /// Whether to enable reversible CCR markers.
+    pub reversible: bool,
+    /// Whether to align JSON keys and whitespace for KV-cache stability.
+    pub use_cache_aligner: bool,
+    /// Ordered list of compressor names to enable.
+    pub compressors: Vec<String>,
+}
+
+impl Default for CompressConfig {
+    fn default() -> Self {
+        Self {
+            reversible: true,
+            use_cache_aligner: false,
+            compressors: vec![
+                "smart_crusher".into(),
+                "ast_code".into(),
+                "log_stripper".into(),
+            ],
+        }
+    }
+}
+
+/// Build a default pipeline with all built-in compressors.
+pub fn default_pipeline() -> pipeline::DefaultCompressionPipeline {
+    pipeline::DefaultCompressionPipeline::new(None, None)
+}
+
+/// Build a pipeline with a shared CCR store.
+pub fn pipeline_with_ccr(ccr_store: Arc<dyn crate::ccr::CcrStore>) -> pipeline::DefaultCompressionPipeline {
+    pipeline::DefaultCompressionPipeline::with_ccr_store(ccr_store)
+}
+
+/// Convenience: compress a full message session in one call.
+pub async fn compress_messages(
+    messages: Vec<context_compress_core::Message>,
+    config: CompressConfig,
+) -> context_compress_core::Result<context_compress_core::CompressedMessages> {
+    let pipeline = default_pipeline();
+    pipeline.run(&messages).await
+}
+
+/// Detect the content type of a string.
+pub fn detect(content: &str) -> detect::DetectionResult {
+    detect::detect_content_type(content)
+}
+
+/// Check if content is a JSON array of dictionaries.
+pub fn is_json_dict_array(content: &str) -> bool {
+    detect::is_json_array_of_dicts(content)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_default_is_reversible() {
+        let cfg = CompressConfig::default();
+        assert!(cfg.reversible);
+    }
+
+    #[test]
+    fn detect_plain_text() {
+        let result = detect("hello world");
+        assert_eq!(result.content_type.as_str(), "plain_text");
+    }
+
+    #[test]
+    fn detect_json_array() {
+        let result = detect("[{\"a\":1}]");
+        assert_eq!(result.content_type.as_str(), "json_array");
+    }
+
+    #[test]
+    fn is_json_dict_array_true() {
+        assert!(is_json_dict_array("[{\"a\":1},{\"b\":2}]"));
+    }
+
+    #[test]
+    fn is_json_dict_array_false() {
+        assert!(!is_json_dict_array("[1,2,3]"));
+    }
+}
