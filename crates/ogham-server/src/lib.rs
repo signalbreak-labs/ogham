@@ -1,3 +1,21 @@
+//! Embeddable HTTP server for the [Ogham](https://github.com/signalbreak-labs/ogham)
+//! context engineering SDK.
+//!
+//! Run standalone (`ogham-server` binary, configured via `OGHAM_*`
+//! environment variables) or mount the router into an existing Axum
+//! application:
+//!
+//! ```no_run
+//! use ogham_server::{app_with_state, AppState};
+//!
+//! let router = axum::Router::new().nest("/ogham", app_with_state(AppState::new()));
+//! ```
+//!
+//! Endpoints: `POST /compress`, `POST /retrieve`, `POST /detect`,
+//! `GET /health`, `GET /stats`. Request/response shapes are documented
+//! on [`app`]. The binary binds `127.0.0.1:3000` by default and never
+//! listens on all interfaces unless explicitly configured.
+
 use axum::{
     Json, Router,
     extract::State,

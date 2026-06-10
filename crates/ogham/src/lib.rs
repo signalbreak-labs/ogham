@@ -1,3 +1,57 @@
+//! # Ogham — LLM context engineering SDK
+//!
+//! Ogham compresses, prunes, and budgets LLM conversation context —
+//! entirely in-process. No subprocesses, no network calls, no
+//! background tasks.
+//!
+//! ## The two API levels
+//!
+//! **Content level** — compress individual payloads (tool outputs,
+//! logs, code, JSON) with content-type detection and reversible CCR
+//! markers:
+//!
+//! ```no_run
+//! # async fn demo() -> ogham::Result<()> {
+//! use ogham::{compress_messages, CompressConfig, Message};
+//!
+//! let out = compress_messages(
+//!     vec![Message::new("tool", r#"[{"id":1},{"id":2}]"#)],
+//!     CompressConfig::default(),
+//! ).await?;
+//! println!("{} -> {} tokens", out.stats.original_tokens, out.stats.compressed_tokens);
+//! # Ok(()) }
+//! ```
+//!
+//! **Conversation level** — agent-aware rules and token budgets over a
+//! whole message history. The canonical order is:
+//!
+//! 1. [`agent::apply_agent_compression`] — clear stale successful tool
+//!    results to retrievable CCR markers; never touch errors, system
+//!    prompts, or the latest user query.
+//! 2. [`budget::enforce_budget`] — escalate through compression,
+//!    summarization, and dropping until the history fits a token
+//!    budget, or fail closed with [`OghamError::BudgetExceeded`].
+//! 3. [`cache_aligner::align_messages`] +
+//!    [`cache_strategy::apply_cache_strategy`] — stabilize bytes and
+//!    annotate provider cache breakpoints.
+//!
+//! ## Guarantees
+//!
+//! - **Fail-closed:** any internal error leaves the original content
+//!   unchanged; oversized prompts return an error instead of being sent.
+//! - **Deterministic:** same input + config ⇒ byte-identical output.
+//! - **Reversible by default:** originals are stored in a [`ccr`] store
+//!   (in-memory, SQLite, or fjall) and retrievable via
+//!   `<<ccr:HASH>>` markers.
+//! - **Honest token counting:** exact for OpenAI encodings with the
+//!   `tiktoken` feature; calibrated estimates with an explicit safety
+//!   margin otherwise (Claude tokenizers are not public).
+//!
+//! ## Feature flags
+//!
+//! - `tiktoken` — enables exact OpenAI token counts via
+//!   `token_counter::TiktokenCounter` (adds the `tiktoken-rs` dependency).
+
 pub mod adaptive_sizer;
 pub mod agent;
 pub mod budget;

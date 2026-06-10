@@ -1,3 +1,23 @@
+//! Core traits and types for [Ogham](https://github.com/signalbreak-labs/ogham),
+//! the pure-Rust LLM context engineering SDK.
+//!
+//! This crate is intentionally tiny: it defines the vocabulary
+//! ([`Message`], [`Content`], [`Compressed`]), the extension points
+//! ([`Compressor`], [`CompressionPipeline`], [`TokenCounter`],
+//! [`Metrics`], [`Observer`]), and the error type ([`OghamError`]) —
+//! and nothing else. No storage backends, no async runtime, no
+//! compression algorithms. Depend on it to implement your own
+//! compressors or observers without pulling in the full `ogham` crate.
+//!
+//! # Conventions
+//!
+//! - **Fail-closed:** implementations must return the original content
+//!   unchanged on any error, never corrupted output.
+//! - **Determinism:** same input + same configuration must produce
+//!   byte-identical output.
+//! - **Metadata tags:** agent semantics ride on
+//!   [`Message::metadata`] using the namespaced keys in [`meta_keys`].
+
 pub mod error;
 pub mod metrics;
 pub mod token;
