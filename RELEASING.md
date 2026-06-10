@@ -1,16 +1,9 @@
 # Releasing Ogham
 
-Releases are tag-driven and fully automated by
+Releases are tag-driven and automated by
 [`.github/workflows/release.yml`](.github/workflows/release.yml).
-
-## One-time setup
-
-1. Create a crates.io API token with publish scope
-   (https://crates.io/settings/tokens).
-2. Add it as the repository secret `CARGO_REGISTRY_TOKEN`.
-3. (Recommended) Create a GitHub environment named `crates-io` and require
-   reviewers on it — the publish job runs in that environment, giving you a
-   manual approval step before anything hits crates.io.
+Releases are currently **GitHub-only** (no crates.io publishing — see the
+last section to enable it later).
 
 ## Cutting a release
 
@@ -29,7 +22,8 @@ Releases are tag-driven and fully automated by
    ```
 
 2. Add a `## [0.2.0] - YYYY-MM-DD` section to `CHANGELOG.md`
-   (keep-a-changelog format — the release notes are extracted from it).
+   (keep-a-changelog format — the GitHub release notes are extracted
+   from it).
 
 3. Verify locally:
 
@@ -38,14 +32,13 @@ Releases are tag-driven and fully automated by
    cargo clippy --workspace --all-targets -- -D warnings
    cargo test --workspace
    cargo test -p ogham --features tiktoken
-   cargo publish -p ogham-core --dry-run
    ```
 
 4. Commit, tag, push:
 
    ```bash
    git commit -am "release: v0.2.0"
-   git tag v0.2.0
+   git tag -a v0.2.0 -m "Ogham v0.2.0"
    git push origin main v0.2.0
    ```
 
@@ -55,33 +48,65 @@ Releases are tag-driven and fully automated by
 tag v0.2.0
    │
    ├─ verify ............ tag == workspace version, full gate
-   ├─ create-release .... GitHub release, notes from CHANGELOG.md
-   │    └─ binaries ..... ogham-server for 5 targets + sha256 checksums
-   │                      (linux x86_64/aarch64, macOS x86_64/aarch64,
-   │                       windows x86_64)
-   └─ publish-crates .... crates.io, in dependency order:
-                          ogham-core → ogham → ogham-server
-                          (gated by the `crates-io` environment)
+   └─ create-release .... GitHub release, notes from CHANGELOG.md
+        └─ binaries ..... ogham-server for 5 targets + sha256 checksums
+                          (linux x86_64/aarch64, macOS x86_64/aarch64,
+                           windows x86_64)
 ```
 
 The verify job hard-fails if the tag doesn't match the workspace version, so
 a mistagged release publishes nothing.
 
-## If publishing fails partway
+## Consuming releases
 
-`cargo publish` is per-crate, and published versions are immutable. If, say,
-`ogham-core` published but `ogham` failed:
+Rust users depend on the crates via git:
 
-- Fix the issue **without changing the version** if the fix doesn't touch
-  published code, re-run the `publish-crates` job (it skips already-published
-  versions with an "already exists" error — re-run publishes the remainder;
-  if cargo aborts on the first crate, comment it out locally and publish the
-  rest by hand: `cargo publish -p ogham && cargo publish -p ogham-server`).
-- If the published crate itself is broken, `cargo yank` it, bump the patch
-  version, and start over.
+```toml
+[dependencies]
+ogham = { git = "https://github.com/signalbreak-labs/ogham", tag = "v0.1.0" }
+```
+
+Server binaries with sha256 checksums are attached to each
+[GitHub release](https://github.com/signalbreak-labs/ogham/releases).
 
 ## Versioning policy
 
 Single version for all three crates (workspace-inherited). Pre-1.0, minor
 bumps may break APIs; breaking changes are listed under a **Changed**/
 **Removed** heading in the changelog.
+
+## Publishing to crates.io (currently disabled)
+
+When ready:
+
+1. Create a crates.io account and an API token with publish scope
+   (https://crates.io/settings/tokens).
+2. Add it as the repository secret `CARGO_REGISTRY_TOKEN`.
+3. (Recommended) Create a GitHub environment named `crates-io` with
+   required reviewers for a manual approval gate.
+4. Restore this job in `release.yml`:
+
+   ```yaml
+   publish-crates:
+     name: Publish to crates.io
+     needs: verify
+     runs-on: ubuntu-latest
+     environment: crates-io
+     steps:
+       - uses: actions/checkout@v6
+       - uses: dtolnay/rust-toolchain@stable
+       - uses: Swatinem/rust-cache@v2
+       - name: Publish (dependency order)
+         env:
+           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+         run: |
+           cargo publish -p ogham-core
+           cargo publish -p ogham
+           cargo publish -p ogham-server
+   ```
+
+   Crate-name availability was verified 2026-06-10 (`ogham`, `ogham-core`,
+   `ogham-server` all free); re-check before first publish. If a publish
+   fails partway, published versions are immutable: re-run the job (cargo
+   errors on already-published crates — publish the remainder by hand), or
+   `cargo yank` and bump the patch version if the published crate is broken.

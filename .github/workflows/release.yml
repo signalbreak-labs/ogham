@@ -1,11 +1,9 @@
 name: Release
 
 # Tag-driven releases: push a tag `vX.Y.Z` that matches the workspace
-# version and this workflow verifies, creates the GitHub release,
-# publishes the crates to crates.io, and attaches ogham-server binaries.
-#
-# Required repository secret: CARGO_REGISTRY_TOKEN (crates.io API token
-# with publish scope). See RELEASING.md.
+# version and this workflow verifies, creates the GitHub release with
+# notes from CHANGELOG.md, and attaches ogham-server binaries.
+# Releases are GitHub-only; see RELEASING.md to enable crates.io.
 
 on:
   push:
@@ -86,21 +84,8 @@ jobs:
           checksum: sha256
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  publish-crates:
-    name: Publish to crates.io
-    needs: verify
-    runs-on: ubuntu-latest
-    environment: crates-io
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Publish (dependency order)
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          # cargo waits for each crate to be available in the index
-          # before returning, so in-order publishing is safe.
-          cargo publish -p ogham-core
-          cargo publish -p ogham
-          cargo publish -p ogham-server
+  # crates.io publishing is intentionally disabled — releases are
+  # GitHub-only for now. To enable: create a crates.io API token with
+  # publish scope, add it as the CARGO_REGISTRY_TOKEN repository secret,
+  # and restore the publish job (see RELEASING.md "Publishing to
+  # crates.io" for the job definition).

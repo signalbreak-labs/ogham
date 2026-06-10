@@ -7,7 +7,8 @@ into an existing Axum app.
 ## Running standalone
 
 ```bash
-cargo install ogham-server     # or grab a release binary
+cargo install --git https://github.com/signalbreak-labs/ogham ogham-server
+# or grab a prebuilt binary from the GitHub releases page
 ogham-server
 # listening on 127.0.0.1:3000
 ```
