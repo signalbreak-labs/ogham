@@ -1,9 +1,10 @@
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use ogham::compress_messages;
 use ogham::compressors::log_stripper::{LogCompressor, LogCompressorConfig};
 use ogham::compressors::smart_crusher::SmartCrusher;
 use ogham::{CompressConfig, detect};
 use ogham_core::Message;
+use std::hint::black_box;
 
 fn build_input(size_kb: usize) -> String {
     let chunk = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. ".repeat(20);
