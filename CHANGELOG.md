@@ -7,6 +7,15 @@ versions may contain breaking changes).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-06-11
+
+### Added
+
+- **crates.io publishing**: releases now publish `ogham-core`, `ogham`,
+  and `ogham-server` to crates.io (in dependency order) in addition to
+  the GitHub release with binaries. Depend on the SDK with
+  `ogham = "0.2"` instead of a git dependency.
+
 ## [0.2.0] - 2026-06-10
 
 Informed by a June 2026 state-of-the-art review (Anthropic context editing,

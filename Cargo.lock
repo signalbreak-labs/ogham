@@ -857,7 +857,7 @@ dependencies = [
 
 [[package]]
 name = "ogham"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "aho-corasick",
  "async-trait",
@@ -880,7 +880,7 @@ dependencies = [
 
 [[package]]
 name = "ogham-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -891,7 +891,7 @@ dependencies = [
 
 [[package]]
 name = "ogham-server"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "axum",
  "http-body-util",
