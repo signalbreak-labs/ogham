@@ -1,6 +1,8 @@
 # Ogham
 
 [![CI](https://github.com/signalbreak-labs/ogham/actions/workflows/ci.yml/badge.svg)](https://github.com/signalbreak-labs/ogham/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/ogham.svg)](https://crates.io/crates/ogham)
+[![docs.rs](https://img.shields.io/docsrs/ogham)](https://docs.rs/ogham)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 > Ogham — the early-Irish script that carved language into compact notches.
@@ -31,13 +33,11 @@ is a deterministic library call.
 
 ## Install
 
-Ogham is distributed via GitHub (not yet on crates.io):
-
 ```toml
 [dependencies]
-ogham = { git = "https://github.com/signalbreak-labs/ogham", tag = "v0.2.0" }
+ogham = "0.2"
 # exact OpenAI token counting:
-# ogham = { git = "https://github.com/signalbreak-labs/ogham", tag = "v0.2.0", features = ["tiktoken"] }
+# ogham = { version = "0.2", features = ["tiktoken"] }
 ```
 
 Prebuilt `ogham-server` binaries (Linux, macOS universal, Windows; sha256 checksums) are on the
@@ -116,8 +116,8 @@ A cleared tool result looks like this — and the original is one
 | [DESIGN.md](DESIGN.md) | the full engineering record: build plan, work packages, ADRs |
 | [CONTRIBUTING.md](CONTRIBUTING.md) · [RELEASING.md](RELEASING.md) · [CHANGELOG.md](CHANGELOG.md) | process |
 
-API reference: `cargo doc --workspace --no-deps --open` (docs.rs links will
-appear once the crates are published to crates.io).
+API reference: [docs.rs/ogham](https://docs.rs/ogham), or locally via
+`cargo doc --workspace --no-deps --open`.
 
 ## Crates
 
@@ -129,7 +129,7 @@ appear once the crates are published to crates.io).
 
 ## Status
 
-`0.2.0` — APIs may change before 1.0 (semver-minor may break). The test
+`0.2.1` — APIs may change before 1.0 (semver-minor may break). The test
 suite covers fail-closed behavior, determinism, fuzzing, golden-file
 regression, and needle-in-haystack survival probes; see
 [CONTRIBUTING.md](CONTRIBUTING.md) for the gate every change must pass.
