@@ -1,5 +1,5 @@
 use crate::ccr::CcrStore;
-use ogham_core::{Message, Result, TokenCounter, meta_keys};
+use ogham_core::{Message, OVERHEAD_PER_MESSAGE, Result, TokenCounter, meta_keys};
 use std::sync::Arc;
 
 /// Agent-semantic classification of a message.
@@ -113,6 +113,9 @@ pub struct AgentPolicy {
     pub clear_old_tool_results: bool,
     /// Keep this many most-recent AssistantReply messages raw. Default 2.
     pub keep_recent_assistant: usize,
+    /// Keep any message overlapping this many estimated trailing tokens raw.
+    /// Default None preserves the 0.2.x count-only behavior.
+    pub protected_tail_tokens: Option<usize>,
 }
 
 impl Default for AgentPolicy {
@@ -121,8 +124,56 @@ impl Default for AgentPolicy {
             keep_recent_tool_results: 3,
             clear_old_tool_results: true,
             keep_recent_assistant: 2,
+            protected_tail_tokens: None,
         }
     }
+}
+
+fn estimated_message_tokens(
+    counter: &crate::token_counter::HeuristicCounter,
+    msg: &Message,
+) -> usize {
+    counter.count(&msg.content) + OVERHEAD_PER_MESSAGE
+}
+
+/// Return a message mask for `protected_tail_tokens`.
+///
+/// Protection is message-granular. If the requested suffix boundary falls in
+/// the middle of a message, the whole message is protected so no protected
+/// token can be rewritten by a later clearing, compression, summary, or drop.
+pub fn protected_tail_mask(
+    messages: &[Message],
+    protected_tail_tokens: Option<usize>,
+) -> Vec<bool> {
+    let mut protected = vec![false; messages.len()];
+    let Some(budget) = protected_tail_tokens else {
+        return protected;
+    };
+    if budget == 0 {
+        return protected;
+    }
+
+    let counter = crate::token_counter::HeuristicCounter::new();
+    let mut tail_tokens = 0usize;
+    for (idx, msg) in messages.iter().enumerate().rev() {
+        if tail_tokens >= budget {
+            break;
+        }
+        protected[idx] = true;
+        tail_tokens = tail_tokens.saturating_add(estimated_message_tokens(&counter, msg));
+    }
+    protected
+}
+
+/// Number of newest messages protected by `protected_tail_tokens`.
+pub fn protected_tail_message_count(
+    messages: &[Message],
+    protected_tail_tokens: Option<usize>,
+) -> usize {
+    protected_tail_mask(messages, protected_tail_tokens)
+        .iter()
+        .filter(|&&is_protected| is_protected)
+        .count()
 }
 
 /// What was done, for observability.
@@ -131,6 +182,8 @@ pub struct AgentCompressionStats {
     pub tool_results_cleared: usize,
     pub tool_results_kept_raw: usize,
     pub errors_preserved: usize,
+    pub protected_tail_messages: usize,
+    pub protected_tail_tokens: usize,
     pub tokens_before: usize,
     pub tokens_after: usize,
 }
@@ -143,14 +196,29 @@ pub async fn apply_agent_compression(
     policy: &AgentPolicy,
     ccr: Option<Arc<dyn CcrStore>>,
 ) -> Result<AgentCompressionStats> {
-    let tokens_before = crate::token_counter::HeuristicCounter::new().count_messages(messages);
+    let counter = crate::token_counter::HeuristicCounter::new();
+    let tokens_before = counter.count_messages(messages);
+    let tail_protected = protected_tail_mask(messages, policy.protected_tail_tokens);
 
     let mut seen_tool_success = 0usize;
-    let mut stats = AgentCompressionStats::default();
+    let mut stats = AgentCompressionStats {
+        protected_tail_messages: tail_protected
+            .iter()
+            .filter(|&&is_protected| is_protected)
+            .count(),
+        protected_tail_tokens: messages
+            .iter()
+            .zip(tail_protected.iter())
+            .filter(|(_, is_protected)| **is_protected)
+            .map(|(msg, _)| estimated_message_tokens(&counter, msg))
+            .sum(),
+        ..AgentCompressionStats::default()
+    };
 
     // Walk newest to oldest.
-    for msg in messages.iter_mut().rev() {
+    for (idx, msg) in messages.iter_mut().enumerate().rev() {
         let kind = classify(msg);
+        let protected_by_tail = tail_protected[idx];
         match kind {
             AgentContentType::SystemInstruction
             | AgentContentType::UserQuery
@@ -165,8 +233,9 @@ pub async fn apply_agent_compression(
                 if msg.metadata.get(meta_keys::PINNED) == Some(&"true".to_string()) {
                     continue;
                 }
-                if seen_tool_success < policy.keep_recent_tool_results {
-                    seen_tool_success += 1;
+                let protected_by_count = seen_tool_success < policy.keep_recent_tool_results;
+                seen_tool_success += 1;
+                if protected_by_tail || protected_by_count {
                     stats.tool_results_kept_raw += 1;
                     continue;
                 }
@@ -180,7 +249,7 @@ pub async fn apply_agent_compression(
                             .get(meta_keys::TOOL_NAME)
                             .cloned()
                             .unwrap_or_else(|| "unknown".to_string());
-                        let n = crate::token_counter::HeuristicCounter::new().count(&msg.content);
+                        let n = counter.count(&msg.content);
                         msg.content = format!(
                             "[tool:{tool_name}] result cleared ({n} tokens) — original retrievable via <<ccr:{hash}>>"
                         );
@@ -199,7 +268,7 @@ pub async fn apply_agent_compression(
     }
 
     stats.tokens_before = tokens_before;
-    stats.tokens_after = crate::token_counter::HeuristicCounter::new().count_messages(messages);
+    stats.tokens_after = counter.count_messages(messages);
     Ok(stats)
 }
 
@@ -207,6 +276,13 @@ pub async fn apply_agent_compression(
 mod tests {
     use super::*;
     use crate::ccr::in_memory::InMemoryCcrStore;
+
+    fn tool_msg(name: &str, content: &str) -> Message {
+        let mut msg = Message::new("tool", content);
+        msg.metadata
+            .insert(meta_keys::TOOL_NAME.to_string(), name.to_string());
+        msg
+    }
 
     #[test]
     fn classify_precedence_metadata_wins() {
@@ -279,12 +355,7 @@ mod tests {
     #[tokio::test]
     async fn recent_tool_results_kept_raw() {
         let mut msgs: Vec<Message> = (0..6)
-            .map(|i| {
-                let mut m = Message::new("tool", format!("output {}", i));
-                m.metadata
-                    .insert(meta_keys::TOOL_NAME.to_string(), format!("tool_{}", i));
-                m
-            })
+            .map(|i| tool_msg(&format!("tool_{}", i), &format!("output {}", i)))
             .collect();
 
         let policy = AgentPolicy::default();
@@ -308,6 +379,93 @@ mod tests {
         for c in &cleared {
             assert!(c.content.contains("<<ccr:"));
         }
+    }
+
+    #[tokio::test]
+    async fn protected_tail_keeps_suffix_and_clears_older_tools() {
+        let tail_assistant = Message::new("assistant", "Decision: keep the live edit plan");
+        let tail_tool = tool_msg("tail", "TAIL_TOOL_OUTPUT_MUST_SURVIVE");
+        let counter = crate::token_counter::HeuristicCounter::new();
+        let tail_budget = estimated_message_tokens(&counter, &tail_assistant)
+            + estimated_message_tokens(&counter, &tail_tool);
+        let mut msgs = vec![
+            tool_msg("old_0", "old output 0"),
+            tool_msg("old_1", "old output 1"),
+            tool_msg("old_2", "old output 2"),
+            tail_assistant.clone(),
+            tail_tool.clone(),
+        ];
+
+        let policy = AgentPolicy {
+            keep_recent_tool_results: 0,
+            clear_old_tool_results: true,
+            protected_tail_tokens: Some(tail_budget),
+            ..Default::default()
+        };
+        let ccr = Some(Arc::new(InMemoryCcrStore::new()) as Arc<dyn CcrStore>);
+        let stats = apply_agent_compression(&mut msgs, &policy, ccr)
+            .await
+            .unwrap();
+
+        assert!(msgs[0].content.starts_with("[tool:old_0] result cleared"));
+        assert!(msgs[1].content.starts_with("[tool:old_1] result cleared"));
+        assert!(msgs[2].content.starts_with("[tool:old_2] result cleared"));
+        assert_eq!(msgs[3].content, tail_assistant.content);
+        assert_eq!(msgs[4].content, tail_tool.content);
+        assert_eq!(stats.tool_results_cleared, 3);
+        assert_eq!(stats.tool_results_kept_raw, 1);
+        assert_eq!(stats.protected_tail_messages, 2);
+        assert_eq!(stats.protected_tail_tokens, tail_budget);
+    }
+
+    #[tokio::test]
+    async fn protected_tail_unions_with_recent_tool_count() {
+        let base_msgs: Vec<Message> = (0..5)
+            .map(|i| tool_msg(&format!("tool_{i}"), &format!("result {i}")))
+            .collect();
+        let counter = crate::token_counter::HeuristicCounter::new();
+        let one_msg = estimated_message_tokens(&counter, &base_msgs[0]);
+        let newest_three_budget = one_msg * 3;
+
+        let mut outside_tail = base_msgs.clone();
+        let policy = AgentPolicy {
+            keep_recent_tool_results: 3,
+            clear_old_tool_results: true,
+            protected_tail_tokens: Some(newest_three_budget),
+            ..Default::default()
+        };
+        apply_agent_compression(
+            &mut outside_tail,
+            &policy,
+            Some(Arc::new(InMemoryCcrStore::new()) as Arc<dyn CcrStore>),
+        )
+        .await
+        .unwrap();
+        assert!(
+            outside_tail[1].content.starts_with("[tool:tool_1]"),
+            "4th-newest tool result outside the token tail must still clear"
+        );
+
+        let mut inside_tail = base_msgs;
+        let policy = AgentPolicy {
+            protected_tail_tokens: Some(newest_three_budget + 1),
+            ..policy
+        };
+        apply_agent_compression(
+            &mut inside_tail,
+            &policy,
+            Some(Arc::new(InMemoryCcrStore::new()) as Arc<dyn CcrStore>),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            inside_tail[1].content, "result 1",
+            "4th-newest tool result inside the token tail must stay raw"
+        );
+        assert!(
+            inside_tail[0].content.starts_with("[tool:tool_0]"),
+            "older tool result outside both protections should still clear"
+        );
     }
 
     #[tokio::test]

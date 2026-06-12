@@ -11,17 +11,17 @@ Each release publishes the crates to **crates.io** and creates a
 
    ```toml
    [workspace.package]
-   version = "0.2.0"
+   version = "0.3.0"
    ```
 
    and the two pinned path-dep versions right below it:
 
    ```toml
-   ogham-core = { path = "crates/ogham-core", version = "0.2.0" }
-   ogham = { path = "crates/ogham", version = "0.2.0" }
+   ogham-core = { path = "crates/ogham-core", version = "0.3.0" }
+   ogham = { path = "crates/ogham", version = "0.3.0" }
    ```
 
-2. Add a `## [0.2.0] - YYYY-MM-DD` section to `CHANGELOG.md`
+2. Add a `## [0.3.0] - YYYY-MM-DD` section to `CHANGELOG.md`
    (keep-a-changelog format — the GitHub release notes are extracted
    from it).
 
@@ -37,15 +37,15 @@ Each release publishes the crates to **crates.io** and creates a
 4. Commit, tag, push:
 
    ```bash
-   git commit -am "release: v0.2.0"
-   git tag -a v0.2.0 -m "Ogham v0.2.0"
-   git push origin main v0.2.0
+   git commit -am "release: v0.3.0"
+   git tag -a v0.3.0 -m "Ogham v0.3.0"
+   git push origin main v0.3.0
    ```
 
 ## What the automation does
 
 ```
-tag v0.2.0
+tag v0.3.0
    │
    ├─ verify ............ tag == workspace version, full gate
    ├─ publish-crates .... cargo publish: ogham-core → ogham → ogham-server
@@ -67,7 +67,7 @@ Rust users depend on the crates via crates.io:
 
 ```toml
 [dependencies]
-ogham = "0.2"
+ogham = "0.3"
 ```
 
 Server binaries with sha256 checksums are attached to each

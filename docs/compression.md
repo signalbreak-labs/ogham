@@ -134,6 +134,27 @@ For structured (rather than first-sentence) summaries of the old band, use
 `compress_conversation_history_with_summarizer` — see
 [agent-context.md](agent-context.md#structured-summaries).
 
+Coding-agent hosts that need a hard recent-suffix guarantee should use the
+agent policy before the age-banded helper:
+
+```rust
+use ogham::agent::AgentPolicy;
+
+let policy = AgentPolicy {
+    // Common cache-aware harnesses protect roughly the last 40k tokens.
+    // This is a recommended starting value, not Ogham's default.
+    protected_tail_tokens: Some(40_000),
+    ..AgentPolicy::default()
+};
+```
+
+`protected_tail_tokens` is `None` by default, preserving the count-only 0.2.x
+behavior. When set, Ogham walks messages newest to oldest with its
+deterministic heuristic token estimator and keeps every message overlapping
+that trailing window byte-for-byte. The protection composes with
+`keep_recent_tool_results` and is also honored by budget enforcement, so the
+protected suffix is not cleared, compressed, summarized, or dropped.
+
 ## Token counting
 
 ```rust

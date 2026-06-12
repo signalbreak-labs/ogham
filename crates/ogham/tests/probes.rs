@@ -119,3 +119,39 @@ fn probes_present_after_compression() {
         );
     });
 }
+
+#[test]
+fn protected_tail_deterministic_after_agent_compression() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let run_once = || async {
+            let mut msgs = make_probe_conversation();
+            let policy = AgentPolicy {
+                protected_tail_tokens: Some(256),
+                ..Default::default()
+            };
+            let ccr_store = Arc::new(InMemoryCcrStore::new());
+            let stats =
+                apply_agent_compression(&mut msgs, &policy, Some(ccr_store as Arc<dyn CcrStore>))
+                    .await
+                    .expect("agent compression failed");
+            let view = msgs
+                .into_iter()
+                .map(|m| (m.role, m.content, m.metadata))
+                .collect::<Vec<_>>();
+            (
+                view,
+                stats.tool_results_cleared,
+                stats.tool_results_kept_raw,
+                stats.protected_tail_messages,
+                stats.protected_tail_tokens,
+                stats.tokens_before,
+                stats.tokens_after,
+            )
+        };
+
+        let first = run_once().await;
+        let second = run_once().await;
+        assert_eq!(first, second);
+    });
+}

@@ -61,7 +61,8 @@ let stats = apply_agent_compression(
     &AgentPolicy::default(),   // keep newest 3 tool results raw, clear older
     Some(ccr_store.clone()),
 ).await?;
-// stats.tool_results_cleared, stats.tokens_before, stats.tokens_after
+// stats.tool_results_cleared, stats.protected_tail_tokens,
+// stats.tokens_before, stats.tokens_after
 ```
 
 A cleared message looks like:
@@ -76,8 +77,29 @@ Guarantees, in priority order:
 - **System instructions and user queries are never touched.**
 - **Pinned messages (`ogham.pinned = "true"`) are never touched.**
 - The newest `keep_recent_tool_results` successes stay raw (default 3).
+- If `protected_tail_tokens` is set, every message overlapping that estimated
+  trailing token window stays raw. This composes with the count-based window:
+  either protection is enough.
 - With no CCR store, nothing is cleared — content is never discarded
   irretrievably (fail-closed).
+
+For coding agents, prefer the token tail over pre-slicing the transcript:
+
+```rust
+let policy = AgentPolicy {
+    // Common cache-aware harnesses protect roughly the last 40k tokens.
+    // Ogham does not make this the default because context sizes vary.
+    protected_tail_tokens: Some(40_000),
+    ..AgentPolicy::default()
+};
+```
+
+The tail is estimated with Ogham's deterministic heuristic counter, including
+per-message overhead, so it lines up with agent stats. Protection is
+message-granular: if the 40k boundary lands inside a message, the whole
+message is retained. `AgentCompressionStats::protected_tail_messages` and
+`protected_tail_tokens` report the measured protected suffix; those tokens are
+treated as retained, not as compressible savings.
 
 ## Token budgets
 
@@ -104,6 +126,12 @@ The cascade runs until the history fits, escalating cheap → lossy:
 | `compress_middle` | compress all but the 4 newest turns through the pipeline |
 | `summarize_old` | fold turns older than the middle band into one summary message |
 | `drop_old` | remove oldest droppable messages one at a time |
+
+When `AgentPolicy::protected_tail_tokens` is set, the budget cascade also
+honors it: protected suffix messages are excluded from middle compression,
+old-turn summarization, and dropping. If the unmodified protected suffix leaves
+too little room to satisfy the budget, `enforce_budget` fails closed with
+`BudgetExceeded`.
 
 `drop_old` never removes system instructions, tool errors, the most recent
 user message, or pinned messages — and it drops in **pair-safe groups**: an

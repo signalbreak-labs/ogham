@@ -7,6 +7,20 @@ versions may contain breaking changes).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-12
+
+### Added
+
+- `AgentPolicy::protected_tail_tokens`, an optional token-budgeted suffix
+  guard for coding-agent transcripts. When set, Ogham keeps every message
+  overlapping the estimated trailing token window byte-for-byte across agent
+  clearing and budget enforcement; `None` preserves 0.2.x behavior.
+
+### Changed
+
+- Relaxed the `rusqlite` dependency requirement to `>=0.38, <0.41`; the
+  workspace test suite passes at both range edges.
+
 ## [0.2.2] - 2026-06-11
 
 ### Changed
@@ -97,6 +111,9 @@ Design substantially derived from
 [Headroom](https://github.com/chopratejas/headroom) (Apache-2.0) — see
 [NOTICE](NOTICE).
 
-[Unreleased]: https://github.com/signalbreak-labs/ogham/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/signalbreak-labs/ogham/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/signalbreak-labs/ogham/compare/v0.2.2...v0.3.0
+[0.2.2]: https://github.com/signalbreak-labs/ogham/compare/v0.2.1...v0.2.2
+[0.2.1]: https://github.com/signalbreak-labs/ogham/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/signalbreak-labs/ogham/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/signalbreak-labs/ogham/releases/tag/v0.1.0

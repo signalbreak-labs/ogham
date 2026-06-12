@@ -79,9 +79,13 @@ pub async fn enforce_budget(
     }
 
     // Step 2: compress_middle
+    let preserve_recent = 4.max(agent::protected_tail_message_count(
+        messages,
+        agent_policy.protected_tail_tokens,
+    ));
     let cfg2 = ConversationConfig {
-        preserve_recent: 4,
-        compress_middle: messages.len().saturating_sub(4),
+        preserve_recent,
+        compress_middle: messages.len().saturating_sub(preserve_recent),
         summary_old: false,
         bias_system: 0.8,
     };
@@ -100,8 +104,12 @@ pub async fn enforce_budget(
     }
 
     // Step 3: summarize_old
+    let preserve_recent = 4.max(agent::protected_tail_message_count(
+        messages,
+        agent_policy.protected_tail_tokens,
+    ));
     let cfg3 = ConversationConfig {
-        preserve_recent: 4,
+        preserve_recent,
         compress_middle: 4,
         summary_old: true,
         bias_system: 0.8,
@@ -128,11 +136,16 @@ pub async fn enforce_budget(
     // any exit on "now under limit" is re-verified with a full recount below.
     let mut running = counter.count_messages(messages);
     while running > effective_limit && messages.len() > 4 {
+        let tail_protected =
+            agent::protected_tail_mask(messages, agent_policy.protected_tail_tokens);
         let latest_user_idx = messages
             .iter()
             .rposition(|m| agent::classify(m) == agent::AgentContentType::UserQuery);
 
         let member_droppable = |i: usize, m: &Message| {
+            if tail_protected.get(i).copied().unwrap_or(false) {
+                return false;
+            }
             let kind = agent::classify(m);
             if matches!(
                 kind,
@@ -447,6 +460,45 @@ mod tests {
             "the assistant call preceding the protected error must survive"
         );
         assert!(msgs[err_idx - 1].content.contains("calling the db tool"));
+    }
+
+    #[tokio::test]
+    async fn protected_tail_survives_budget_cascade() {
+        let mut msgs = vec![Message::new("system", "sys")];
+        for i in 0..12 {
+            msgs.push(Message::new(
+                "assistant",
+                format!("old turn {i} {}", "x".repeat(400)),
+            ));
+        }
+        msgs.push(Message::new("assistant", "TAIL_DECISION_MUST_SURVIVE"));
+        msgs.push(Message::new("user", "latest question"));
+
+        let counter = HeuristicCounter::new();
+        let tail_budget = counter.count_messages(&msgs[msgs.len() - 2..]);
+        let protected = [
+            msgs[msgs.len() - 2].content.clone(),
+            msgs[msgs.len() - 1].content.clone(),
+        ];
+        let budget = ContextBudget {
+            total_limit: tail_budget + 32,
+            safety_margin: Some(0.0),
+        };
+        let pipeline = DefaultCompressionPipeline::new(None, None);
+        let policy = AgentPolicy {
+            protected_tail_tokens: Some(tail_budget),
+            ..Default::default()
+        };
+
+        let _ = enforce_budget(&mut msgs, &budget, &counter, &pipeline, &policy, None).await;
+
+        let final_text = msgs
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(final_text.contains(&protected[0]));
+        assert!(final_text.contains(&protected[1]));
     }
 
     #[tokio::test]
