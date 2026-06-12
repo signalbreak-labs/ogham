@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use ogham_core::{Message, Result};
 
 /// Summarizes a span of messages. The library ships ExtractiveSummarizer;
-/// hosts may implement this with an LLM (e.g. Host).
+/// hosts may implement this with an LLM.
 #[async_trait]
 pub trait Summarizer: Send + Sync {
     async fn summarize(

@@ -1,6 +1,6 @@
 //! Metrics and observability traits for ogham.
 //!
-//! Downstream systems (like Host) implement [`Metrics`] and [`Observer`]
+//! Downstream systems (agent runtimes, hosts) implement [`Metrics`] and [`Observer`]
 //! to forward compression events into their own telemetry (tracing spans,
 //! audit logs, Prometheus, etc.).
 

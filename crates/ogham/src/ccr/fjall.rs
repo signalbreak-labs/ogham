@@ -24,7 +24,7 @@ impl FjallCcrStore {
     }
 
     /// Wrap an *existing* fjall keyspace so CCR shares the same DB file.
-    /// This is critical for Host integration where the application already
+    /// This is critical for host integration where the application already
     /// owns a keyspace.
     pub fn from_keyspace(keyspace: &fjall::Keyspace, partition_name: &str) -> Result<Self> {
         let partition = keyspace

@@ -137,7 +137,7 @@ pub fn app() -> Router {
     app_with_state(AppState::new())
 }
 
-/// Mountable router over caller-provided state — this is what Host embeds.
+/// Mountable router over caller-provided state — this is what host applications embed.
 pub fn app_with_state(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))

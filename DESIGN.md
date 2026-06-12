@@ -52,7 +52,7 @@ done-criteria. Do not invent APIs that are not specified here.
    - [WP-9: Evaluation, Golden Files & Benchmarks](#wp-9-evaluation-golden-files--benchmarks)
 6. [Execution Order & Dependency Graph](#6-execution-order--dependency-graph)
 7. [Invariants (Must Always Hold)](#7-invariants-must-always-hold)
-8. [Host Integration (External — Informational)](#8-legacy-integration-external--informational)
+8. [Host Integration (External — Informational)](#8-host-integration-external--informational)
 9. [Decision Records](#9-decision-records)
 10. [References](#10-references)
 
@@ -239,19 +239,19 @@ v1.0 claims are corrected; the rest of v1.0's intent is preserved in the WPs bel
 | Phases 0–2 to be built over 4 weeks | Already built and tested (§1). Remaining work is WP-1…WP-9. |
 | §15.2: `msg.metadata.insert("cache_control", ...)` | `Message` has no `metadata` field. WP-3 adds it; WP-7 uses it. |
 | "Exact token counting" via `tiktoken-rs` + `HuggingFaceCounter` | tiktoken is exact only for OpenAI encodings. Anthropic's tokenizer is private — counts for Claude are estimates with a safety margin. HF `tokenizers` dep dropped (heavy, no current consumer). WP-2 specifies the honest design. |
-| LTM uses "heavy abstractive summarization" | The library cannot call an LLM (Rule 3). WP-6 ships a deterministic extractive summarizer and a `Summarizer` trait the host (Host) can implement with its own LLM. |
+| LTM uses "heavy abstractive summarization" | The library cannot call an LLM (Rule 3). WP-6 ships a deterministic extractive summarizer and a `Summarizer` trait the host can implement with its own LLM. |
 | ADR-4: "proactive async" background compaction | Violates Rule 4. Compaction is caller-driven; the host may call it from its own background task. ADR-4 rewritten (§9). |
 | Server crate "future" | Exists. WP-8 hardens it (configurable bind/store, mountable router). |
-| `headroom-core` facts (pinned rev, proxy subprocess, 2 code paths) | Still accurate per the Host analysis doc; integration itself happens in the Host repo (§8), not here. |
+| `headroom-core` facts (pinned rev, proxy subprocess, 2 code paths) | Still accurate per the host-integration analysis; integration itself happens in the host repo (§8), not here. |
 | 14-week roadmap with week counts | Replaced by ordered WPs with done-criteria. No calendar estimates. |
-| `ToolCall`/`WorkingSet` structs with rich fields (`Vec<ToolCall>`, `Vec<ErrorTrace>`) | Over-modeled. v2.0 keeps everything on `Message` + metadata tags (WP-3/WP-4) so the library stays provider-agnostic and Host doesn't need lossy conversions. |
+| `ToolCall`/`WorkingSet` structs with rich fields (`Vec<ToolCall>`, `Vec<ErrorTrace>`) | Over-modeled. v2.0 keeps everything on `Message` + metadata tags (WP-3/WP-4) so the library stays provider-agnostic and hosts don't need lossy conversions. |
 
 ---
 
 ## 4. Target Architecture
 
 ```
-                         Host application (Host, CLI, tests)
+                         Host application (agent runtime, CLI, tests)
                                         │
         ┌───────────────────────────────┼─────────────────────────────────┐
         │ content-level                 │ conversation-level              │
@@ -997,7 +997,7 @@ impl StructuredSummary {
 }
 
 /// Summarizes a span of messages. The library ships ExtractiveSummarizer;
-/// hosts may implement this with an LLM (e.g. Host).
+/// hosts may implement this with an LLM.
 #[async_trait]
 pub trait Summarizer: Send + Sync {
     async fn summarize(
@@ -1162,7 +1162,7 @@ impl AppState {
 // AppState.ccr_store field type changes: Arc<InMemoryCcrStore> -> Arc<dyn CcrStore>.
 
 /// Existing: pub fn app() -> Router  (keep, delegating to app_with_state(AppState::new()))
-/// New: mountable router over caller-provided state — this is what Host embeds.
+/// New: mountable router over caller-provided state — this is what a host embeds.
 pub fn app_with_state(state: AppState) -> Router;
 ```
 
@@ -1330,30 +1330,28 @@ must still encode the invariant.
 
 ## 8. Host Integration (External — Informational)
 
-This work happens **in the Host repository**, not here. It is listed so the library's
-API surface is designed against a real consumer. Verified facts about Host's current
-state (verified directly against the Host codebase during planning): `headroom-core` pinned to git
-rev `ec7d0065`; proxy mode spawns a `headroom` subprocess with port allocation and
-45-second `/livez` health-check polling (`legacy-cli/src/commands/run/headroom_proxy.rs`,
-~1,035 lines); two divergent code paths in `legacy-mcp/src/tools/context_efficiency.rs`;
-`chars/4` token heuristic; no conversation-level budget.
+This work happens **in the host repository**, not here. It is listed so the library's
+API surface is designed against a real consumer: an agent runtime that previously
+embedded `headroom-core` (pinned to a git rev) and ran `headroom` as a proxy subprocess
+with port allocation and health-check polling, used a `chars/4` token heuristic, and
+had no conversation-level budget.
 
 Integration sequence (each step maps to library APIs that exist after the WPs):
 
 1. **Dependency swap:** `headroom-core = { git = ... }` → `context-compress = { path/git }`.
    In-process calls move to `compress_messages` / `DefaultCompressionPipeline`.
-2. **Kill the proxy subprocess:** replace `HeadroomProxyManager` with
-   `context_compress_server::app_with_state(...)` mounted in Host's existing Axum
+2. **Kill the proxy subprocess:** replace the proxy-subprocess manager with
+   `context_compress_server::app_with_state(...)` mounted in the host's existing Axum
    router (WP-8), or drop HTTP entirely and call the library.
-3. **Audit logging:** implement `Observer` writing Host's `audit.jsonl` event format.
-4. **Budget:** call `budget::enforce_budget` in Host's message-assembly path with
+3. **Audit logging:** implement `Observer` writing the host's audit-log event format.
+4. **Budget:** call `budget::enforce_budget` in the host's message-assembly path with
    `counter_for_model(model)`.
-5. **Agent rules:** Host tags messages with `meta_keys::TOOL_NAME` / `TOOL_STATUS` at
+5. **Agent rules:** the host tags messages with `meta_keys::TOOL_NAME` / `TOOL_STATUS` at
    the point it records tool results; calls `agent::apply_agent_compression`.
-6. **LTM:** Host implements `Summarizer` with its own LLM client; persists
+6. **LTM:** the host implements `Summarizer` with its own LLM client; persists
    `StructuredSummary` (it's `serde`-serializable) in its fjall event store; passes
    `FjallCcrStore::from_keyspace`-style sharing if desired (constructor exists).
-7. **Config mapping** (Host yaml):
+7. **Config mapping** (host yaml):
    ```yaml
    context:
      compression:
@@ -1418,7 +1416,6 @@ changing the hash breaks every stored marker.
 
 ## 10. References
 
-- Host codebase: `/home/dev/workspace/example`
 - Headroom: https://github.com/chopratejas/headroom (attribution in `NOTICE`)
 - Anthropic, "Effective Context Engineering for AI Agents":
   https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents
