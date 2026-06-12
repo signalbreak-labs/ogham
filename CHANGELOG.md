@@ -7,6 +7,17 @@ versions may contain breaking changes).
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-06-11
+
+### Changed
+
+- Replaced a machine-specific path in a golden-test fixture and
+  genericized references to a downstream project in docs and doc
+  comments. No behavior changes.
+- First version available on crates.io: the 0.2.1 packages were
+  deleted from the registry before this release and were never
+  generally consumed.
+
 ## [0.2.1] - 2026-06-11
 
 ### Added

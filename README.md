@@ -129,7 +129,7 @@ API reference: [docs.rs/ogham](https://docs.rs/ogham), or locally via
 
 ## Status
 
-`0.2.1` — APIs may change before 1.0 (semver-minor may break). The test
+`0.2.2` — APIs may change before 1.0 (semver-minor may break). The test
 suite covers fail-closed behavior, determinism, fuzzing, golden-file
 regression, and needle-in-haystack survival probes; see
 [CONTRIBUTING.md](CONTRIBUTING.md) for the gate every change must pass.
