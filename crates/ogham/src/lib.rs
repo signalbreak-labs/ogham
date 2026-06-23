@@ -58,6 +58,7 @@ pub mod budget;
 pub mod cache_aligner;
 pub mod cache_strategy;
 pub mod ccr;
+pub mod compact;
 pub mod compressors;
 pub mod conversation;
 pub mod detect;
@@ -73,7 +74,7 @@ pub use ogham_core::*;
 pub use token_counter::{HeuristicCounter, counter_for_model};
 
 use crate::ccr::CcrStore;
-use crate::pipeline::DefaultCompressionPipeline;
+use crate::pipeline::{DEFAULT_COMPRESSORS, DefaultCompressionPipeline};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -95,14 +96,22 @@ impl Default for CompressConfig {
                 "smart_crusher".into(),
                 "ast_code".into(),
                 "log_stripper".into(),
+                "semantic".into(),
             ],
             ccr_store_path: None,
         }
     }
 }
 
-/// Build a pipeline with the built-in compressors enabled by `config`.
+/// Build a pipeline with the default built-in compressors and an in-memory CCR store.
 pub fn default_pipeline() -> DefaultCompressionPipeline {
+    let ccr_store = Arc::new(crate::ccr::in_memory::InMemoryCcrStore::new());
+    DefaultCompressionPipeline::with_builtin_compressors(Some(ccr_store), DEFAULT_COMPRESSORS)
+        .expect("static default compressor names must be valid")
+}
+
+/// Build an empty pipeline for tests or custom compressor registration.
+pub fn empty_pipeline() -> DefaultCompressionPipeline {
     DefaultCompressionPipeline::new(None, None)
 }
 
@@ -116,18 +125,31 @@ pub async fn compress_messages(
     messages: Vec<Message>,
     config: CompressConfig,
 ) -> Result<CompressedMessages> {
-    let pipeline = if let Some(path) = &config.ccr_store_path {
-        let ccr_store = Arc::new(
-            crate::ccr::sqlite::SqliteCcrStore::open(path, 300)
-                .map_err(|e| OghamError::StoreError(e.to_string()))?,
-        );
-        DefaultCompressionPipeline::with_ccr_store(ccr_store)
+    let ccr_store = if config.reversible {
+        if let Some(path) = &config.ccr_store_path {
+            Some(Arc::new(
+                crate::ccr::sqlite::SqliteCcrStore::open(path, 300)
+                    .map_err(|e| OghamError::StoreError(e.to_string()))?,
+            ) as Arc<dyn CcrStore>)
+        } else {
+            Some(Arc::new(crate::ccr::in_memory::InMemoryCcrStore::new()) as Arc<dyn CcrStore>)
+        }
     } else {
-        let ccr_store = Arc::new(crate::ccr::in_memory::InMemoryCcrStore::new());
-        DefaultCompressionPipeline::with_ccr_store(ccr_store)
+        None
     };
+    let mut pipeline =
+        DefaultCompressionPipeline::with_builtin_compressors(ccr_store, &config.compressors)?
+            .with_reversible(config.reversible);
+    if config.use_cache_aligner {
+        pipeline = pipeline.with_align_cache();
+    }
     pipeline.run(&messages).await
 }
+
+pub use compact::{
+    CachePlan, CachePolicy, CcrPolicy, CompactConfig, CompactResult, CompressionPolicy, FoldKind,
+    FoldRecord, ProtectedReport, compact_conversation,
+};
 
 /// Detect the content type of a string.
 pub fn detect(content: &str) -> crate::detect::DetectionResult {

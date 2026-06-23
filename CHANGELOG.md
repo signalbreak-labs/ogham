@@ -7,6 +7,35 @@ versions may contain breaking changes).
 
 ## [Unreleased]
 
+### Added
+
+- `compact_conversation()` plus `CompactConfig`/`CompactResult` and the
+  `FoldRecord`, `FoldKind`, `ProtectedReport`, `CachePlan`, `CompressionPolicy`,
+  `CcrPolicy`, and `CachePolicy` types: a high-level conversation compaction API
+  that returns auditable fold records (cleared/compressed/summarized/dropped),
+  a protected-tail report, optional budget/agent reports, provider cache
+  annotations, and warnings — so hosts no longer scrape `<<ccr:...>>` markers.
+- `ogham::empty_pipeline()` and
+  `DefaultCompressionPipeline::with_builtin_compressors()` for explicit,
+  allowlist-driven pipeline construction.
+
+### Changed
+
+- `ogham::default_pipeline()` now registers the default built-in compressors
+  with an in-memory CCR store instead of returning an empty pipeline. Use
+  `ogham::empty_pipeline()` (or `DefaultCompressionPipeline::default()`) for the
+  previous empty behavior.
+- `compress_messages()` now honors every `CompressConfig` field: `reversible`
+  (suppresses CCR construction and `<<ccr:...>>` markers when false),
+  `use_cache_aligner`, the `compressors` allowlist, and `ccr_store_path`
+  (opened only when `reversible` is true).
+- Compressor CCR saves are now awaited and fail-closed: a save error keeps the
+  original message content instead of being silently dropped by a detached
+  `tokio::spawn`.
+- Reversible pipeline compression now annotates rewritten messages with
+  `metadata["ogham.ccr_id"]`, giving `FoldRecord::ccr_id` a durable top-level
+  restore key even when compressed text has no embedded CCR marker.
+
 ## [0.3.0] - 2026-06-12
 
 ### Added

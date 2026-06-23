@@ -26,6 +26,7 @@ is a deterministic library call.
 | **Reversible by default** | originals live in a CCR store (in-memory, SQLite, fjall); compressed text carries `<<ccr:HASH>>` markers the model can dereference |
 | **Agent-aware rules** | clears stale successful tool results to one-line stubs; **never** touches errors, system prompts, the latest user query, or pinned messages |
 | **Token budgets** | a degradation cascade (compress → summarize → drop) that fits any history into a limit — or refuses with `BudgetExceeded` rather than overflow |
+| **Fold records** | `compact_conversation()` returns auditable records for cleared, compressed, summarized, and dropped spans so hosts do not scrape marker strings |
 | **Honest token counting** | exact for OpenAI encodings (`tiktoken` feature); calibrated estimates with an explicit safety margin elsewhere — Claude tokenizers aren't public and Ogham doesn't pretend otherwise |
 | **Structured summaries** | deterministic extraction of files / decisions / errors / next-steps, plus a `Summarizer` trait for LLM-backed memory |
 | **Prompt-cache support** | byte-stable prefixes + provider breakpoint annotation for KV-cache reuse |
@@ -57,6 +58,37 @@ let out = compress_messages(
 println!("{} -> {} tokens ({:.0}% saved)",
     out.stats.original_tokens, out.stats.compressed_tokens,
     (1.0 - out.stats.ratio) * 100.0);
+```
+
+`CompressConfig` is active: toggle reversible CCR markers, cache alignment,
+SQLite-backed storage, and the built-in compressor allowlist per call.
+
+**Compact and audit a conversation** (preferred high-level API):
+
+```rust
+use std::sync::Arc;
+use ogham::{
+    compact_conversation, CachePolicy, CcrPolicy, CompactConfig,
+    CompressionPolicy, Message,
+};
+use ogham::agent::AgentPolicy;
+use ogham::budget::ContextBudget;
+use ogham::ccr::in_memory::InMemoryCcrStore;
+
+let ccr = Arc::new(InMemoryCcrStore::new());
+let result = compact_conversation(messages, CompactConfig {
+    budget: Some(ContextBudget { total_limit: 180_000, safety_margin: None }),
+    agent_policy: AgentPolicy::default(),
+    compression: CompressionPolicy::safe_agent_default(),
+    ccr: CcrPolicy::Store(ccr),
+    cache: CachePolicy::OpenAi { stable_suffix_messages: 4 },
+    model: Some("claude-fable-5".to_string()),
+    focus: None,
+}).await?;
+
+for fold in &result.folds {
+    println!("record fold {} covering {:?}", fold.id, fold.original_range);
+}
 ```
 
 **Fit a whole conversation into a budget** (conversation level):

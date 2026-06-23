@@ -23,6 +23,15 @@ println!("ratio: {:.2}", result.stats.ratio);
 store. Set `ccr_store_path: Some(path)` to persist originals in SQLite
 instead.
 
+All `CompressConfig` fields are honored by this wrapper:
+
+- `reversible: false` constructs compressors without a CCR store and suppresses
+  `<<ccr:...>>` markers and `metadata["ogham.ccr_id"]` annotations.
+- `use_cache_aligner: true` normalizes message bytes before routing.
+- `compressors` is an allowlist of built-in names; an empty list performs only
+  optional cache alignment and otherwise returns content unchanged.
+- `ccr_store_path` is opened only when `reversible` is true.
+
 ## Building a pipeline explicitly
 
 For control over the store, metrics, observers, and cache alignment:
@@ -42,6 +51,10 @@ let pipeline = DefaultCompressionPipeline::builder()
 
 let out = pipeline.run(&messages).await?;
 ```
+
+`ogham::default_pipeline()` is the convenience constructor for the default
+built-ins plus an in-memory CCR store. `ogham::empty_pipeline()` is available
+for tests or fully custom compressor registration.
 
 Per-message failure is contained: if a compressor errors, that message passes
 through unchanged and the error is reported via the `Observer`
@@ -129,6 +142,47 @@ let stats = compress_conversation_history(
     &ctx,
 ).await?;
 ```
+
+## Compact conversation with fold records
+
+New integrations should prefer `compact_conversation()` when they need an
+auditable result for a UI, ledger, or undo system:
+
+```rust
+use std::sync::Arc;
+use ogham::{
+    compact_conversation, CachePolicy, CcrPolicy, CompactConfig,
+    CompressionPolicy, Message,
+};
+use ogham::agent::AgentPolicy;
+use ogham::budget::ContextBudget;
+use ogham::ccr::in_memory::InMemoryCcrStore;
+
+let ccr = Arc::new(InMemoryCcrStore::new());
+let result = compact_conversation(messages, CompactConfig {
+    budget: Some(ContextBudget { total_limit: 180_000, safety_margin: None }),
+    agent_policy: AgentPolicy::default(),
+    compression: CompressionPolicy::safe_agent_default(),
+    ccr: CcrPolicy::Store(ccr),
+    cache: CachePolicy::Anthropic { stable_suffix_messages: 4 },
+    model: Some("claude-fable-5".to_string()),
+    focus: Some("answer the latest user request".to_string()),
+}).await?;
+
+for fold in &result.folds {
+    println!("fold {} {:?} {:?}", fold.id, fold.kind, fold.original_range);
+}
+```
+
+The returned `CompactResult` contains rewritten `messages`, `folds`, a
+`ProtectedReport`, optional budget/agent reports, cache annotations, and
+warnings for degraded policies such as requesting reversible compression with
+CCR disabled.
+
+For reversible compression, rewritten messages carry `metadata["ogham.ccr_id"]`
+when the top-level original was saved. `FoldRecord::ccr_id` reads that metadata
+first, so downstream hosts can persist undo/ledger entries without parsing
+marker strings from message text.
 
 For structured (rather than first-sentence) summaries of the old band, use
 `compress_conversation_history_with_summarizer` — see

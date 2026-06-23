@@ -84,12 +84,7 @@ impl Compressor for SemanticCompressor {
         if ctx.reversible
             && let Some(store) = &self.ccr_store
         {
-            let store_ref = store.clone();
-            let id_clone = id.clone();
-            let text_clone = text.to_string();
-            tokio::spawn(async move {
-                let _ = store_ref.save(&id_clone, &text_clone, None).await;
-            });
+            store.save(&id, &text, None).await?;
         }
         Ok(Compressed {
             id,
