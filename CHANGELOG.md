@@ -21,6 +21,10 @@ versions may contain breaking changes).
 
 ### Changed
 
+- `AgentPolicy::keep_recent_assistant` is now enforced: under budget pressure the
+  compression cascade preserves at least the span covering the most-recent N
+  assistant replies, keeping them raw instead of compressing them in the middle
+  band. Previously the field was accepted but ignored.
 - CCR content addresses (`ccr::compute_key`) are now versioned, collision-resistant
   BLAKE3 keys of the form `b3:<32 hex>` instead of bare MD5. The `b3:` tag lets the
   hash scheme evolve unambiguously; stores key on the literal id, so content saved

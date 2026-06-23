@@ -70,17 +70,10 @@ The safety and honesty foundation is in place:
   the SQLite and embedded-KV stores, the regex-backed log stripper, the
   flate2-based size validator, the TOON encoder, and the HTTP server. `ogham`'s
   core compression and in-memory CCR should pull none of these by default.
-- **Versioned, collision-resistant CCR IDs.** Replace the legacy MD5 content
-  address with a versioned, modern hash so CCR keys are suitable as durable,
-  public content addresses, while continuing to retrieve content stored under the
-  older scheme.
 - **Broaden focus-hint steering.** `SmartCrusher` already biases JSON-array
   record retention on the `CompactConfig.focus` hint, end to end through the
   budget cascade. Extend the same steering to the other content-type compressors
   (logs, code, semantic text), still without overriding protected content.
-- **Enforce `keep_recent_assistant`.** Treat the most-recent N assistant replies
-  as a protected window in the agent and budget passes, matching the documented
-  policy.
 
 ### Mid-term: richer host content and provider planning
 

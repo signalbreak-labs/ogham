@@ -79,10 +79,15 @@ pub async fn enforce_budget(
     }
 
     // Step 2: compress_middle
-    let preserve_recent = 4.max(agent::protected_tail_message_count(
-        messages,
-        agent_policy.protected_tail_tokens,
-    ));
+    let preserve_recent = 4
+        .max(agent::protected_tail_message_count(
+            messages,
+            agent_policy.protected_tail_tokens,
+        ))
+        .max(agent::recent_assistant_preserve_count(
+            messages,
+            agent_policy.keep_recent_assistant,
+        ));
     let cfg2 = ConversationConfig {
         preserve_recent,
         compress_middle: messages.len().saturating_sub(preserve_recent),
@@ -104,10 +109,15 @@ pub async fn enforce_budget(
     }
 
     // Step 3: summarize_old
-    let preserve_recent = 4.max(agent::protected_tail_message_count(
-        messages,
-        agent_policy.protected_tail_tokens,
-    ));
+    let preserve_recent = 4
+        .max(agent::protected_tail_message_count(
+            messages,
+            agent_policy.protected_tail_tokens,
+        ))
+        .max(agent::recent_assistant_preserve_count(
+            messages,
+            agent_policy.keep_recent_assistant,
+        ));
     let cfg3 = ConversationConfig {
         preserve_recent,
         compress_middle: 4,
@@ -525,5 +535,76 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(report.effective_limit, 95);
+    }
+
+    /// A recent assistant reply pushed out of the default preserve window by
+    /// trailing tool messages is compressed by default, but kept raw when
+    /// `keep_recent_assistant` covers it. A separate large tool output supplies
+    /// the compressible bulk so the budget is met either way (no drop).
+    #[tokio::test]
+    async fn keep_recent_assistant_preserves_recent_assistant_raw() {
+        fn json_array(n: usize, needle_at: usize, needle: &str) -> String {
+            let items: Vec<serde_json::Value> = (0..n)
+                .map(|i| {
+                    let tag = if i == needle_at { needle } else { "aaaaa" };
+                    serde_json::json!({ "id": format!("{:03}", i), "tag": tag })
+                })
+                .collect();
+            serde_json::to_string(&items).expect("serialize")
+        }
+
+        // assistant (idx 2) sits 4 messages from the end — outside preserve=4.
+        let build = || {
+            vec![
+                Message::new("system", "sys"),
+                Message::new("tool", json_array(200, 100, "aaaaa")),
+                Message::new("assistant", json_array(60, 30, "zzzzz")),
+                Message::new("tool", "t3"),
+                Message::new("tool", "t4"),
+                Message::new("tool", "t5"),
+                Message::new("user", "latest"),
+            ]
+        };
+
+        let budget = ContextBudget {
+            total_limit: 800,
+            safety_margin: Some(0.0),
+        };
+        let counter = HeuristicCounter::new();
+        let pipeline = DefaultCompressionPipeline::with_builtin_compressors(
+            None,
+            crate::pipeline::DEFAULT_COMPRESSORS,
+        )
+        .expect("pipeline");
+        let policy = |keep: usize| AgentPolicy {
+            keep_recent_tool_results: 8,
+            clear_old_tool_results: false,
+            keep_recent_assistant: keep,
+            protected_tail_tokens: None,
+        };
+        let joined = |msgs: &[Message]| {
+            msgs.iter()
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let mut without = build();
+        enforce_budget(&mut without, &budget, &counter, &pipeline, &policy(0), None)
+            .await
+            .unwrap();
+        assert!(
+            !joined(&without).contains("zzzzz"),
+            "without keep_recent_assistant the recent assistant is compressed away"
+        );
+
+        let mut with = build();
+        enforce_budget(&mut with, &budget, &counter, &pipeline, &policy(1), None)
+            .await
+            .unwrap();
+        assert!(
+            joined(&with).contains("zzzzz"),
+            "keep_recent_assistant must preserve the recent assistant raw"
+        );
     }
 }

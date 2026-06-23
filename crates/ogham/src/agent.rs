@@ -111,7 +111,9 @@ pub struct AgentPolicy {
     /// Tool results older than the kept window are CLEARED (replaced by a stub +
     /// CCR marker) if true, otherwise compressed via the pipeline. Default true.
     pub clear_old_tool_results: bool,
-    /// Keep this many most-recent AssistantReply messages raw. Default 2.
+    /// Keep this many most-recent AssistantReply messages raw under budget
+    /// pressure: the compression cascade preserves at least the span covering
+    /// them instead of compressing them in the middle band. Default 2.
     pub keep_recent_assistant: usize,
     /// Keep any message overlapping this many estimated trailing tokens raw.
     /// Default None preserves the 0.2.x count-only behavior.
@@ -174,6 +176,38 @@ pub fn protected_tail_message_count(
         .iter()
         .filter(|&&is_protected| is_protected)
         .count()
+}
+
+/// Mask marking the most-recent `keep` AssistantReply messages.
+///
+/// All-false when `keep` is zero or there are no assistant replies.
+pub fn recent_assistant_mask(messages: &[Message], keep: usize) -> Vec<bool> {
+    let mut mask = vec![false; messages.len()];
+    if keep == 0 {
+        return mask;
+    }
+    let mut seen = 0usize;
+    for (idx, msg) in messages.iter().enumerate().rev() {
+        if classify(msg) == AgentContentType::AssistantReply {
+            mask[idx] = true;
+            seen += 1;
+            if seen >= keep {
+                break;
+            }
+        }
+    }
+    mask
+}
+
+/// Number of trailing messages that must be preserved verbatim so the most
+/// recent `keep` assistant replies stay raw (not compressed in the middle
+/// band). Zero when `keep` is zero or there are no assistant replies.
+pub fn recent_assistant_preserve_count(messages: &[Message], keep: usize) -> usize {
+    recent_assistant_mask(messages, keep)
+        .iter()
+        .position(|&protected| protected)
+        .map(|first| messages.len() - first)
+        .unwrap_or(0)
 }
 
 /// What was done, for observability.
@@ -282,6 +316,27 @@ mod tests {
         msg.metadata
             .insert(meta_keys::TOOL_NAME.to_string(), name.to_string());
         msg
+    }
+
+    #[test]
+    fn recent_assistant_mask_marks_newest_n() {
+        let msgs = vec![
+            Message::new("system", "s"),
+            Message::new("assistant", "a0"),
+            Message::new("user", "u"),
+            Message::new("assistant", "a1"),
+            Message::new("tool", "t"),
+            Message::new("tool", "t"),
+        ];
+        // Two newest assistants are at indices 3 and 1.
+        let mask = recent_assistant_mask(&msgs, 2);
+        assert_eq!(mask, vec![false, true, false, true, false, false]);
+        // Preserve span reaches back to the oldest protected assistant (idx 1).
+        assert_eq!(recent_assistant_preserve_count(&msgs, 2), msgs.len() - 1);
+        // keep = 0 protects nothing.
+        assert_eq!(recent_assistant_preserve_count(&msgs, 0), 0);
+        // keep = 1 only covers the newest assistant (idx 3).
+        assert_eq!(recent_assistant_preserve_count(&msgs, 1), msgs.len() - 3);
     }
 
     #[test]
