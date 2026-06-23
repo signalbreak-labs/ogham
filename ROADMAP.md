@@ -101,9 +101,12 @@ The safety and honesty foundation is in place:
   richer Anthropic rendering of tool-result / image blocks (depends on the rich
   content model), and per-model cache thresholds. Ogham emits plans — hosts own
   the HTTP calls and auth.
-- **Token-counter reporting.** Distinguish `Exact`, `Estimated { method,
-  safety_margin }`, and `ProviderReported` counts, add a model-family counter
-  registry, and surface safety margins in `BudgetReport`.
+- **Token-counter reporting.** Done. `TokenCountKind` distinguishes `Exact`,
+  `Estimated { method, safety_margin }`, and `ProviderReported`; `count_kind()`
+  reports it per counter; `BudgetReport` surfaces the count kind and applied
+  margin. Model-family selection lives in `counter_for_model` (calibrated by
+  prefix). Possible follow-up: a `CountedTokens { tokens, kind }` return type for
+  per-count provenance.
 
 ### Longer-term: optional power features
 

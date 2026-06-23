@@ -9,6 +9,11 @@ versions may contain breaking changes).
 
 ### Added
 
+- Honest token-count provenance: `TokenCountKind`
+  (`Exact` / `Estimated { method, safety_margin }` / `ProviderReported`) and a
+  `TokenCounter::count_kind()` default method, so a counter declares how its
+  counts are produced. `HeuristicCounter` and the tiktoken counter report their
+  method and recommended safety margin.
 - `ogham::rich`: block-aware compression. `compress_rich_messages()` compresses
   the bulky text *inside* `RichMessage` blocks (routing each text payload through
   the content-type compressors) while preserving tool-call ids, non-text blocks
@@ -57,6 +62,10 @@ versions may contain breaking changes).
 
 ### Changed
 
+- `BudgetReport` now carries `count_kind` and the `safety_margin` actually
+  applied, so a report never presents an estimate as exact. The budget cascade
+  derives its margin from the counter's `count_kind` (behavior-preserving: exact
+  counts use `0.0`, estimates use the counter's declared margin, e.g. `0.05`).
 - `CompactResult.cache_plan` (`CachePlan`) now reports stable-prefix accounting:
   `stable_prefix_messages`, `stable_prefix_tokens`, `cacheable`, a content-keyed
   `content_key` (set for OpenAI/Gemini/Generic, `None` for Anthropic), and

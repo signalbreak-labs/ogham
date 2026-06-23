@@ -2,7 +2,7 @@ use crate::agent::{self, AgentPolicy};
 use crate::ccr::CcrStore;
 use crate::conversation::{self, ConversationConfig};
 use crate::pipeline::DefaultCompressionPipeline;
-use ogham_core::{Message, OghamError, Result, TokenCounter};
+use ogham_core::{Message, OghamError, Result, TokenCountKind, TokenCounter};
 use std::sync::Arc;
 
 /// Token budget for one LLM call.
@@ -34,6 +34,12 @@ pub struct BudgetReport {
     /// Names of the steps that ran, in order: subset of
     /// ["agent_rules", "compress_middle", "summarize_old", "drop_old"].
     pub steps_applied: Vec<String>,
+    /// How the token counts in this report were produced. Estimated counts mean
+    /// `tokens_initial`/`tokens_final` carry the counter's safety margin.
+    pub count_kind: TokenCountKind,
+    /// The fractional safety margin actually applied to derive `effective_limit`
+    /// from `ContextBudget::total_limit`.
+    pub safety_margin: f64,
 }
 
 /// Make `messages` fit `budget`. Mutates in place. Fail-closed per step;
@@ -49,15 +55,18 @@ pub async fn enforce_budget(
     agent_policy: &AgentPolicy,
     ccr: Option<Arc<dyn CcrStore>>,
 ) -> Result<BudgetReport> {
+    let count_kind = counter.count_kind();
     let margin = budget
         .safety_margin
-        .unwrap_or(if counter.is_exact() { 0.0 } else { 0.05 });
+        .unwrap_or_else(|| count_kind.safety_margin());
     let effective_limit = budget
         .total_limit
         .saturating_sub(((budget.total_limit as f64) * margin).ceil() as usize);
 
     let mut report = BudgetReport {
         effective_limit,
+        count_kind,
+        safety_margin: margin,
         ..BudgetReport::default()
     };
 
@@ -535,6 +544,48 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(report.effective_limit, 95);
+    }
+
+    #[tokio::test]
+    async fn report_surfaces_count_kind_and_margin() {
+        let pipeline = DefaultCompressionPipeline::new(None, None);
+        let policy = AgentPolicy::default();
+        let budget = ContextBudget {
+            total_limit: 1_000_000,
+            safety_margin: None,
+        };
+
+        // Estimated counter (no explicit margin) -> nonzero applied margin.
+        let mut msgs = make_text_msgs(3, 10);
+        let report = enforce_budget(
+            &mut msgs,
+            &budget,
+            &HeuristicCounter::new(),
+            &pipeline,
+            &policy,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!report.count_kind.is_exact());
+        assert!(report.safety_margin > 0.0);
+
+        // Exact counter -> Exact kind, zero margin.
+        struct ExactCounter;
+        impl TokenCounter for ExactCounter {
+            fn count(&self, t: &str) -> usize {
+                t.len()
+            }
+            fn is_exact(&self) -> bool {
+                true
+            }
+        }
+        let mut msgs2 = make_text_msgs(3, 10);
+        let report2 = enforce_budget(&mut msgs2, &budget, &ExactCounter, &pipeline, &policy, None)
+            .await
+            .unwrap();
+        assert_eq!(report2.count_kind, TokenCountKind::Exact);
+        assert_eq!(report2.safety_margin, 0.0);
     }
 
     /// A recent assistant reply pushed out of the default preserve window by

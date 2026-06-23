@@ -1,6 +1,6 @@
 #[cfg(feature = "tiktoken")]
 use ogham_core::Result;
-use ogham_core::TokenCounter;
+use ogham_core::{TokenCountKind, TokenCounter};
 use std::sync::Arc;
 
 /// Bytes-per-token heuristic, optionally calibrated per model family.
@@ -46,6 +46,12 @@ impl TokenCounter for HeuristicCounter {
     }
     fn is_exact(&self) -> bool {
         false
+    }
+    fn count_kind(&self) -> TokenCountKind {
+        TokenCountKind::Estimated {
+            method: format!("bytes/{:.1} heuristic", self.bytes_per_token),
+            safety_margin: 0.05,
+        }
     }
 }
 
@@ -106,6 +112,18 @@ impl TokenCounter for TiktokenCounter {
     fn is_exact(&self) -> bool {
         self.exact
     }
+    fn count_kind(&self) -> TokenCountKind {
+        if self.exact {
+            TokenCountKind::Exact
+        } else {
+            // Non-target families (e.g. Claude) use the o200k tokenizer scaled
+            // by 1.1; report the residual margin so budgets stay honest.
+            TokenCountKind::Estimated {
+                method: "o200k proxy (x1.1)".to_string(),
+                safety_margin: 0.05,
+            }
+        }
+    }
 }
 
 /// Best available counter for `model`. Never fails:
@@ -153,6 +171,21 @@ mod tests {
     }
 
     #[test]
+    fn heuristic_reports_estimated_kind_with_margin() {
+        match HeuristicCounter::for_model("claude-fable-5").count_kind() {
+            TokenCountKind::Estimated {
+                method,
+                safety_margin,
+            } => {
+                assert!(safety_margin > 0.0, "estimates must carry headroom");
+                assert!(method.contains("3.5"), "method should name the calibration");
+            }
+            other => panic!("heuristic must report an estimate, got {other:?}"),
+        }
+        assert!(!HeuristicCounter::new().count_kind().is_exact());
+    }
+
+    #[test]
     fn overhead_constant_matches_spec() {
         assert_eq!(OVERHEAD_PER_MESSAGE, 4);
     }
@@ -172,6 +205,20 @@ mod tests {
         fn tiktoken_claude_is_estimate() {
             let counter = TiktokenCounter::for_model("claude-opus-4-8").unwrap();
             assert!(!counter.is_exact());
+        }
+
+        #[test]
+        fn tiktoken_kind_matches_exactness() {
+            assert_eq!(
+                TiktokenCounter::for_model("gpt-4o").unwrap().count_kind(),
+                TokenCountKind::Exact
+            );
+            assert!(
+                !TiktokenCounter::for_model("claude-opus-4-8")
+                    .unwrap()
+                    .count_kind()
+                    .is_exact()
+            );
         }
     }
 }

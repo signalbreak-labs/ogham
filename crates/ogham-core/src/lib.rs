@@ -29,7 +29,7 @@ pub use metrics::{
     CompressionEvent, Metrics, NoopMetrics, NoopObserver, Observer, PerCompressorStats,
     PipelineStats, TestMetrics, TestObserver,
 };
-pub use token::{OVERHEAD_PER_MESSAGE, TokenCounter};
+pub use token::{OVERHEAD_PER_MESSAGE, TokenCountKind, TokenCounter};
 
 use async_trait::async_trait;
 use bytes::Bytes;
