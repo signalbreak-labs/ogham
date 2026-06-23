@@ -75,9 +75,10 @@ pub struct CompactConfig {
     /// Optional focus/question hint forwarded to compressors via
     /// `CompressionContext::question_hint`.
     ///
-    /// The hint is plumbed end to end but is not yet consumed by any built-in
-    /// compressor, so it does not change output today. See `ROADMAP.md`
-    /// ("Consume the focus hint").
+    /// `SmartCrusher` consumes it to bias which records survive sampling of
+    /// large JSON arrays; other built-in compressors currently ignore it.
+    /// Protected content (system prompts, errors, the latest user query, the
+    /// protected tail) is never overridden by focus.
     pub focus: Option<String>,
 }
 

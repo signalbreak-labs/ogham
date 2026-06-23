@@ -21,6 +21,13 @@ versions may contain breaking changes).
 
 ### Changed
 
+- The focus / question hint (`CompactConfig.focus`,
+  `DefaultCompressionPipeline::with_question_hint()`) is now consumed:
+  `SmartCrusher` boosts records whose serialized form matches the hint so they
+  survive sampling of large JSON arrays, end to end through `compact_conversation`
+  and the budget cascade. An empty hint leaves output unchanged, and protected
+  content (system prompts, errors, latest user query, protected tail) is never
+  overridden. Other built-in compressors still ignore the hint.
 - `ogham::default_pipeline()` now registers the default built-in compressors
   with an in-memory CCR store instead of returning an empty pipeline. Use
   `ogham::empty_pipeline()` (or `DefaultCompressionPipeline::default()`) for the

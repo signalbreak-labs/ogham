@@ -74,11 +74,10 @@ The safety and honesty foundation is in place:
   address with a versioned, modern hash so CCR keys are suitable as durable,
   public content addresses, while continuing to retrieve content stored under the
   older scheme.
-- **Consume the focus hint.** The focus / question hint is plumbed from
-  `CompactConfig.focus` through `CompressionContext.question_hint`. Make a
-  built-in compressor actually bias on it (e.g. ranking which records to keep)
-  and thread it through the conversation-level budget cascade, without ever
-  overriding protected content.
+- **Broaden focus-hint steering.** `SmartCrusher` already biases JSON-array
+  record retention on the `CompactConfig.focus` hint, end to end through the
+  budget cascade. Extend the same steering to the other content-type compressors
+  (logs, code, semantic text), still without overriding protected content.
 - **Enforce `keep_recent_assistant`.** Treat the most-recent N assistant replies
   as a protected window in the agent and budget passes, matching the documented
   policy.
