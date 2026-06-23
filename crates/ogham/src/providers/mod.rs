@@ -7,3 +7,4 @@
 //! data-structure builders — Ogham never talks to providers itself.
 
 pub mod anthropic;
+pub mod openai;

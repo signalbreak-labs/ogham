@@ -9,6 +9,11 @@ versions may contain breaking changes).
 
 ### Added
 
+- `providers::openai`: prompt-cache planning helpers — `stable_prefix_report()`
+  reports the cacheable stable-prefix boundary, whether it clears OpenAI's
+  ~1024-token auto-cache threshold, and a deterministic `prompt_cache_key()`
+  derived from prefix content for cache routing. Advisory only: no message
+  mutation and no invented request fields (OpenAI caching is automatic).
 - `compact_conversation()` plus `CompactConfig`/`CompactResult` and the
   `FoldRecord`, `FoldKind`, `ProtectedReport`, `CachePlan`, `CompressionPolicy`,
   `CcrPolicy`, and `CachePolicy` types: a high-level conversation compaction API

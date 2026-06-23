@@ -88,11 +88,12 @@ The safety and honesty foundation is in place:
 - **Block-aware CCR payloads.** Let CCR store typed payloads (bytes + media type
   + metadata), not only UTF-8 strings, so an undo can restore exact structured
   content. Keep the string `save`/`retrieve` API as a convenience wrapper.
-- **Provider cache planning.** Return a `CachePlan` describing stable-prefix
-  spans, provider-specific annotations, and risk notes. Render Anthropic
-  `cache_control` breakpoints; report OpenAI stable-prefix boundaries without
-  inventing request fields; add Gemini cache-candidate spans. Ogham emits plans —
-  hosts own the HTTP calls and auth.
+- **Provider cache planning.** OpenAI stable-prefix reporting ships in
+  `providers::openai` (`stable_prefix_report` plus a deterministic
+  `prompt_cache_key`, with no invented request fields). Still to do: an Anthropic
+  `cache_control` request renderer (pairs with the rich content model for tool
+  blocks), Gemini cache-candidate spans, and folding stable-prefix data into the
+  `CompactResult` cache plan. Ogham emits plans — hosts own the HTTP calls and auth.
 - **Token-counter reporting.** Distinguish `Exact`, `Estimated { method,
   safety_margin }`, and `ProviderReported` counts, add a model-family counter
   registry, and surface safety margins in `BudgetReport`.
