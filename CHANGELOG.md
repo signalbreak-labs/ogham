@@ -9,11 +9,20 @@ versions may contain breaking changes).
 
 ### Added
 
-- `providers::openai`: prompt-cache planning helpers — `stable_prefix_report()`
-  reports the cacheable stable-prefix boundary, whether it clears OpenAI's
-  ~1024-token auto-cache threshold, and a deterministic `prompt_cache_key()`
-  derived from prefix content for cache routing. Advisory only: no message
-  mutation and no invented request fields (OpenAI caching is automatic).
+- Provider cache planning across `providers`:
+  - `providers::openai` — `stable_prefix_report()` reports the cacheable
+    stable-prefix boundary, whether it clears OpenAI's ~1024-token auto-cache
+    threshold, and a deterministic `prompt_cache_key()` (no invented request
+    fields; OpenAI caching is automatic).
+  - `providers::gemini` — `cache_candidate()` reports the explicit-cache
+    candidate prefix span, token estimate, and a deterministic `content_id` to
+    detect when a Gemini `CachedContent` must be refreshed.
+  - `providers::anthropic::render_cache_control()` renders messages into the
+    Anthropic `system`/`messages` request parts, attaching
+    `cache_control: ephemeral` to annotated blocks.
+  - `providers::content_key()` — shared deterministic content identity for a
+    message span.
+  All are advisory pure data-structure builders; Ogham never calls a provider.
 - `compact_conversation()` plus `CompactConfig`/`CompactResult` and the
   `FoldRecord`, `FoldKind`, `ProtectedReport`, `CachePlan`, `CompressionPolicy`,
   `CcrPolicy`, and `CachePolicy` types: a high-level conversation compaction API
@@ -26,6 +35,10 @@ versions may contain breaking changes).
 
 ### Changed
 
+- `CompactResult.cache_plan` (`CachePlan`) now reports stable-prefix accounting:
+  `stable_prefix_messages`, `stable_prefix_tokens`, `cacheable`, a content-keyed
+  `content_key` (set for OpenAI/Gemini/Generic, `None` for Anthropic), and
+  `notes`. (Additive fields on a returned struct.)
 - The heavy embedded CCR stores are now feature-gated: `ccr-sqlite` (`rusqlite`)
   and `ccr-fjall` (`fjall`). Both remain in the default feature set, so existing
   builds are unchanged; `cargo build --no-default-features` now yields a lean,

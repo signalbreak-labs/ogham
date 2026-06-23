@@ -112,12 +112,26 @@ pub struct ProtectedReport {
     pub protected_message_indices: Vec<usize>,
 }
 
-/// Provider-cache annotations applied to the returned messages.
+/// Provider-cache annotations and stable-prefix accounting for the returned
+/// messages.
 #[derive(Debug, Clone, Default)]
 pub struct CachePlan {
     pub policy: String,
     pub stable_suffix_messages: usize,
     pub annotated_message_indices: Vec<usize>,
+    /// Number of leading messages that form the stable (cacheable) prefix.
+    pub stable_prefix_messages: usize,
+    /// Estimated tokens in the stable prefix.
+    pub stable_prefix_tokens: usize,
+    /// Whether the stable prefix is large enough for provider caching to engage.
+    pub cacheable: bool,
+    /// Deterministic content identity for the stable prefix, for content-keyed
+    /// provider caches (OpenAI `prompt_cache_key`, Gemini `CachedContent`).
+    /// `None` for Anthropic (which uses `cache_control` breakpoints) and when
+    /// there is no stable prefix.
+    pub content_key: Option<String>,
+    /// Notes about cache boundaries or risks.
+    pub notes: Vec<String>,
 }
 
 /// Fully compacted messages plus audit records for downstream ledgers/UIs.
@@ -190,7 +204,7 @@ pub async fn compact_conversation(
     }
 
     let folds = build_fold_records(&original, &mut working, &saved_internal_values, &counter);
-    let cache_plan = apply_cache_policy(&mut working, config.cache, &mut warnings);
+    let cache_plan = apply_cache_policy(&mut working, config.cache, &counter, &mut warnings);
 
     Ok(CompactResult {
         messages: working,
@@ -425,6 +439,7 @@ fn extract_ccr_marker(content: &str) -> Option<String> {
 fn apply_cache_policy(
     messages: &mut [Message],
     policy: CachePolicy,
+    counter: &dyn TokenCounter,
     warnings: &mut Vec<String>,
 ) -> CachePlan {
     let (policy_name, stable_suffix_messages, strategy) = match policy {
@@ -482,10 +497,39 @@ fn apply_cache_policy(
         })
         .collect();
 
+    // Stable-prefix accounting (provider-agnostic). The prefix is everything
+    // before the volatile suffix; metadata annotations do not affect counts.
+    let prefix_len = messages.len().saturating_sub(stable_suffix_messages);
+    let prefix = &messages[..prefix_len];
+    let stable_prefix_tokens = counter.count_messages(prefix);
+    let cacheable = stable_prefix_tokens >= crate::providers::openai::MIN_CACHEABLE_PREFIX_TOKENS;
+
+    // Content-keyed providers (OpenAI prompt_cache_key, Gemini CachedContent)
+    // identify the prefix by content; Anthropic uses cache_control breakpoints.
+    let content_key = match policy {
+        CachePolicy::OpenAi { .. } | CachePolicy::Gemini { .. } | CachePolicy::Generic { .. } => {
+            (!prefix.is_empty()).then(|| crate::providers::content_key(prefix))
+        }
+        CachePolicy::Anthropic { .. } | CachePolicy::None => None,
+    };
+
+    let mut notes = Vec::new();
+    if stable_suffix_messages > 0 && !prefix.is_empty() && !cacheable {
+        notes.push(format!(
+            "stable prefix is {stable_prefix_tokens} tokens; provider prompt caching typically engages around {}+",
+            crate::providers::openai::MIN_CACHEABLE_PREFIX_TOKENS
+        ));
+    }
+
     CachePlan {
         policy: policy_name.to_string(),
         stable_suffix_messages,
         annotated_message_indices,
+        stable_prefix_messages: prefix_len,
+        stable_prefix_tokens,
+        cacheable,
+        content_key,
+        notes,
     }
 }
 
@@ -570,6 +614,36 @@ mod tests {
 
         assert_eq!(result.cache_plan.policy, "anthropic");
         assert!(!result.cache_plan.annotated_message_indices.is_empty());
+        // Anthropic uses cache_control breakpoints, not a content key.
+        assert!(result.cache_plan.content_key.is_none());
+        assert_eq!(result.cache_plan.stable_prefix_messages, 2);
+    }
+
+    #[tokio::test]
+    async fn compact_conversation_cache_plan_reports_stable_prefix() {
+        let result = compact_conversation(
+            vec![
+                Message::new("system", "sys"),
+                Message::new("user", "hi"),
+                Message::new("assistant", "there"),
+                Message::new("user", "latest"),
+            ],
+            CompactConfig {
+                cache: CachePolicy::OpenAi {
+                    stable_suffix_messages: 1,
+                },
+                ..CompactConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.cache_plan.policy, "openai");
+        // 4 messages, 1 volatile suffix => 3-message stable prefix.
+        assert_eq!(result.cache_plan.stable_prefix_messages, 3);
+        // OpenAI is content-keyed; no fake cache_control annotations.
+        assert!(result.cache_plan.content_key.is_some());
+        assert!(result.cache_plan.annotated_message_indices.is_empty());
     }
 
     #[test]

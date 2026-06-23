@@ -11,6 +11,7 @@
 //! (exposed as [`BETA_HEADER`]).
 
 use crate::agent::AgentPolicy;
+use ogham_core::{Message, meta_keys};
 use serde_json::{Value, json};
 
 /// Value for the `anthropic-beta` request header that enables context editing.
@@ -75,6 +76,52 @@ impl AnthropicContextEditing {
     }
 }
 
+/// Anthropic Messages API request parts rendered from a flat message list.
+///
+/// Splits system messages into the top-level `system` field and user/assistant
+/// turns into `messages`, attaching `"cache_control": {"type": "ephemeral"}` to
+/// the content block of any message annotated by
+/// [`crate::cache_strategy::apply_cache_strategy`].
+///
+/// This renders plain-text content only: a non-system role other than
+/// `assistant` is normalized to `user` (valid Anthropic roles), and tool-result
+/// / image / other rich blocks are flattened to text until the host-neutral
+/// rich content model lands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnthropicMessages {
+    /// The `system` request field as an array of content blocks (possibly empty).
+    pub system: Vec<Value>,
+    /// The `messages` request field: user/assistant turns.
+    pub messages: Vec<Value>,
+}
+
+/// Render `messages` into [`AnthropicMessages`], placing cache breakpoints on
+/// blocks whose source message carries the `cache_control` annotation.
+pub fn render_cache_control(messages: &[Message]) -> AnthropicMessages {
+    let mut system = Vec::new();
+    let mut turns = Vec::new();
+    for m in messages {
+        let mut block = json!({ "type": "text", "text": m.content });
+        if m.metadata.contains_key(meta_keys::CACHE_CONTROL) {
+            block["cache_control"] = json!({ "type": "ephemeral" });
+        }
+        if m.role == "system" {
+            system.push(block);
+        } else {
+            let role = if m.role == "assistant" {
+                "assistant"
+            } else {
+                "user"
+            };
+            turns.push(json!({ "role": role, "content": [block] }));
+        }
+    }
+    AnthropicMessages {
+        system,
+        messages: turns,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,6 +163,54 @@ mod tests {
         assert_eq!(
             cfg.to_request_fragment().to_string(),
             cfg.to_request_fragment().to_string()
+        );
+    }
+
+    #[test]
+    fn render_places_cache_control_on_annotated_blocks() {
+        let mut msgs = vec![
+            Message::new("system", "rules"),
+            Message::new("user", "hi"),
+            Message::new("assistant", "hello"),
+        ];
+        msgs[0].metadata.insert(
+            meta_keys::CACHE_CONTROL.to_string(),
+            "ephemeral".to_string(),
+        );
+
+        let rendered = render_cache_control(&msgs);
+        // System split out, with a cache breakpoint.
+        assert_eq!(rendered.system.len(), 1);
+        assert_eq!(rendered.system[0]["cache_control"]["type"], "ephemeral");
+        // Two turns, neither annotated.
+        assert_eq!(rendered.messages.len(), 2);
+        assert_eq!(rendered.messages[0]["role"], "user");
+        assert_eq!(rendered.messages[1]["role"], "assistant");
+        assert!(
+            rendered.messages[0]["content"][0]
+                .get("cache_control")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn render_normalizes_unknown_roles_to_user() {
+        let msgs = vec![Message::new("tool", "result text")];
+        let rendered = render_cache_control(&msgs);
+        assert!(rendered.system.is_empty());
+        assert_eq!(rendered.messages[0]["role"], "user");
+        assert_eq!(rendered.messages[0]["content"][0]["text"], "result text");
+    }
+
+    #[test]
+    fn render_without_annotations_has_no_cache_control() {
+        let msgs = vec![Message::new("system", "rules"), Message::new("user", "hi")];
+        let rendered = render_cache_control(&msgs);
+        assert!(rendered.system[0].get("cache_control").is_none());
+        assert!(
+            rendered.messages[0]["content"][0]
+                .get("cache_control")
+                .is_none()
         );
     }
 }

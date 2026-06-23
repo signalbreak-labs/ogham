@@ -9,7 +9,6 @@
 //! cache routing. Like every adapter in [`crate::providers`], this is a pure
 //! data-structure builder — Ogham never talks to OpenAI itself.
 
-use crate::ccr::compute_key;
 use ogham_core::{Message, TokenCounter};
 
 /// OpenAI's approximate minimum prefix length, in tokens, before automatic
@@ -80,12 +79,7 @@ pub fn stable_prefix_report(
 /// share a prefix to the same OpenAI cache bucket. Returns an empty-prefix key
 /// for an empty slice; callers normally guard on a non-empty prefix.
 pub fn prompt_cache_key(prefix: &[Message]) -> String {
-    let joined = prefix
-        .iter()
-        .map(|m| format!("{}\n{}", m.role, m.content))
-        .collect::<Vec<_>>()
-        .join("\n---\n");
-    format!("ogham-{}", compute_key(joined.as_bytes()))
+    crate::providers::content_key(prefix)
 }
 
 #[cfg(test)]
