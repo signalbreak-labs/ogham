@@ -21,6 +21,13 @@ versions may contain breaking changes).
 
 ### Changed
 
+- The heavy embedded CCR stores are now feature-gated: `ccr-sqlite` (`rusqlite`)
+  and `ccr-fjall` (`fjall`). Both remain in the default feature set, so existing
+  builds are unchanged; `cargo build --no-default-features` now yields a lean,
+  in-memory-only dependency set that excludes `rusqlite` and `fjall`. Calling
+  `compress_messages` with `ccr_store_path` set without `ccr-sqlite` returns a
+  typed `StoreError` instead of failing to compile. The unused `aho-corasick`
+  dependency was dropped.
 - `AgentPolicy::keep_recent_assistant` is now enforced: under budget pressure the
   compression cascade preserves at least the span covering the most-recent N
   assistant replies, keeping them raw instead of compressing them in the middle

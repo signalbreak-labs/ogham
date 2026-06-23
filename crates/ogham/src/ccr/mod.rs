@@ -1,5 +1,7 @@
+#[cfg(feature = "ccr-fjall")]
 pub mod fjall;
 pub mod in_memory;
+#[cfg(feature = "ccr-sqlite")]
 pub mod sqlite;
 
 use async_trait::async_trait;

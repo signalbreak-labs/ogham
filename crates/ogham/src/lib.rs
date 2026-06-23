@@ -49,8 +49,17 @@
 //!
 //! ## Feature flags
 //!
-//! - `tiktoken` — enables exact OpenAI token counts via
+//! - `ccr-sqlite` *(default)* — persistent SQLite CCR store
+//!   (`ccr::sqlite::SqliteCcrStore`, pulls `rusqlite`). Required for
+//!   `CompressConfig::ccr_store_path`.
+//! - `ccr-fjall` *(default)* — embedded-KV CCR store
+//!   (`ccr::fjall::FjallCcrStore`, pulls `fjall`).
+//! - `tiktoken` — exact OpenAI token counts via
 //!   `token_counter::TiktokenCounter` (adds the `tiktoken-rs` dependency).
+//!
+//! Build with `--no-default-features` for a lean dependency set: in-memory CCR
+//! only, no `rusqlite`/`fjall`. Re-enable persistence with `ccr-sqlite` and/or
+//! `ccr-fjall`.
 
 pub mod adaptive_sizer;
 pub mod agent;
@@ -120,19 +129,37 @@ pub fn pipeline_with_ccr(ccr_store: Arc<dyn CcrStore>) -> DefaultCompressionPipe
     DefaultCompressionPipeline::with_ccr_store(ccr_store)
 }
 
+/// Open the persistent CCR store backing `ccr_store_path`.
+///
+/// Requires the `ccr-sqlite` feature; without it, a configured path is a
+/// typed error rather than a silent fallback.
+#[cfg(feature = "ccr-sqlite")]
+fn open_path_ccr_store(path: &std::path::Path) -> Result<Arc<dyn CcrStore>> {
+    Ok(Arc::new(
+        crate::ccr::sqlite::SqliteCcrStore::open(path, 300)
+            .map_err(|e| OghamError::StoreError(e.to_string()))?,
+    ) as Arc<dyn CcrStore>)
+}
+
+#[cfg(not(feature = "ccr-sqlite"))]
+fn open_path_ccr_store(path: &std::path::Path) -> Result<Arc<dyn CcrStore>> {
+    Err(OghamError::StoreError(format!(
+        "ccr_store_path ({}) requires the `ccr-sqlite` feature",
+        path.display()
+    )))
+}
+
 /// Convenience: compress a full message session in one call.
 pub async fn compress_messages(
     messages: Vec<Message>,
     config: CompressConfig,
 ) -> Result<CompressedMessages> {
     let ccr_store = if config.reversible {
-        if let Some(path) = &config.ccr_store_path {
-            Some(Arc::new(
-                crate::ccr::sqlite::SqliteCcrStore::open(path, 300)
-                    .map_err(|e| OghamError::StoreError(e.to_string()))?,
-            ) as Arc<dyn CcrStore>)
-        } else {
-            Some(Arc::new(crate::ccr::in_memory::InMemoryCcrStore::new()) as Arc<dyn CcrStore>)
+        match &config.ccr_store_path {
+            Some(path) => Some(open_path_ccr_store(path)?),
+            None => {
+                Some(Arc::new(crate::ccr::in_memory::InMemoryCcrStore::new()) as Arc<dyn CcrStore>)
+            }
         }
     } else {
         None

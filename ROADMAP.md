@@ -65,11 +65,14 @@ The safety and honesty foundation is in place:
 
 ### Near-term: correctness and dependency hygiene
 
-- **Feature-gate dependency weight.** Split the heavy or situational backends and
-  compressors behind features so the default build is lean. Target gates include
-  the SQLite and embedded-KV stores, the regex-backed log stripper, the
-  flate2-based size validator, the TOON encoder, and the HTTP server. `ogham`'s
-  core compression and in-memory CCR should pull none of these by default.
+- **Slim the default feature set.** The heavy embedded stores are already gated:
+  `ccr-sqlite` (`rusqlite`) and `ccr-fjall` (`fjall`) are on by default for
+  backward compatibility, and `--no-default-features` yields an in-memory-only
+  lean build. The remaining step is a deliberate (breaking) release that moves
+  these out of the default set so the default build is lean by default. The
+  lighter deps (`regex` in content detection, `flate2` in adaptive sizing) sit in
+  core paths and stay non-optional; the TOON encoder is pure Rust and pulls no
+  backend.
 - **Broaden focus-hint steering.** `SmartCrusher` already biases JSON-array
   record retention on the `CompactConfig.focus` hint, end to end through the
   budget cascade. Extend the same steering to the other content-type compressors

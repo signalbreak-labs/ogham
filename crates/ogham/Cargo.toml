@@ -12,8 +12,14 @@ keywords.workspace = true
 categories.workspace = true
 
 [features]
-default = []
+# Default keeps both embedded CCR backends so existing builds are unchanged.
+# Build with `--no-default-features` for a lean dependency set (in-memory CCR
+# only); opt back into the heavy stores with `ccr-sqlite` / `ccr-fjall`.
+default = ["ccr-sqlite", "ccr-fjall"]
 tiktoken = ["dep:tiktoken-rs"]
+# Persistent CCR stores, each pulling a heavy backend only when enabled.
+ccr-sqlite = ["dep:rusqlite"]
+ccr-fjall = ["dep:fjall"]
 
 [dependencies]
 ogham-core = { workspace = true }
@@ -29,11 +35,11 @@ tracing = { workspace = true }
 tiktoken-rs = { version = "0.12", optional = true }
 
 blake3 = "1"
-fjall = "2"
 regex = "1"
 md5 = "0.8"
 flate2 = "1"
-rusqlite = { version = ">=0.38, <0.41", features = ["bundled"] }
+fjall = { version = "2", optional = true }
+rusqlite = { version = ">=0.38, <0.41", features = ["bundled"], optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
