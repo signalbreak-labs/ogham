@@ -9,6 +9,14 @@ versions may contain breaking changes).
 
 ### Added
 
+- `ogham::rich`: block-aware compression. `compress_rich_messages()` compresses
+  the bulky text *inside* `RichMessage` blocks (routing each text payload through
+  the content-type compressors) while preserving tool-call ids, non-text blocks
+  (images/references), and roles — so a host never flattens structured content to
+  a JSON string. Reversibility is message-level: each rewritten message's original
+  blocks are stored as a `CcrPayload` and tagged with `meta_keys::CCR_ID`, and
+  `restore_rich_message()` returns the exact original. Saves are awaited and fail
+  closed.
 - Block-aware CCR payloads: `ccr::CcrPayload` (media type + bytes + metadata)
   with `CcrStore::save_payload` / `retrieve_payload` default methods, so every
   store can persist and restore exact structured originals (e.g. serialized

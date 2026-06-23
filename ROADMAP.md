@@ -80,12 +80,15 @@ The safety and honesty foundation is in place:
 
 ### Mid-term: richer host content and provider planning
 
-- **Host-neutral rich content model.** Shipped in `ogham_core::content`: a
+- **Host-neutral rich content model.** Done. `ogham_core::content` defines a
   block-structured `RichMessage` (text / thinking / image / tool-use /
   tool-result / reference) that round-trips losslessly through serde, with an
-  explicit, marked lossy flattening to the text `Message`. Remaining: compress
-  text *inside* blocks while preserving tool ids and non-text blocks, and a
-  block-aware pipeline path so hosts no longer flatten to a JSON string at all.
+  explicit marked lossy flattening to the text `Message`; and
+  `ogham::rich::compress_rich_messages` compresses the text *inside* blocks while
+  preserving tool ids and non-text blocks, with message-level reversible undo, so
+  hosts no longer flatten to a JSON string at all. Possible follow-up: fold
+  block-aware compaction into a single `compact_rich` entry point alongside the
+  budget cascade and fold records.
 - **Block-aware CCR payloads.** Shipped: `ccr::CcrPayload` plus
   `CcrStore::save_payload` / `retrieve_payload` (default methods over the
   existing text store), so a host can store and restore exact structured

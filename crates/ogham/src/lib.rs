@@ -74,6 +74,7 @@ pub mod detect;
 pub mod memory;
 pub mod pipeline;
 pub mod providers;
+pub mod rich;
 pub mod stats_math;
 pub mod token_counter;
 pub mod token_est;
@@ -177,6 +178,7 @@ pub use compact::{
     CachePlan, CachePolicy, CcrPolicy, CompactConfig, CompactResult, CompressionPolicy, FoldKind,
     FoldRecord, ProtectedReport, compact_conversation,
 };
+pub use rich::{RichCompressionPolicy, compress_rich_messages, restore_rich_message};
 
 /// Detect the content type of a string.
 pub fn detect(content: &str) -> crate::detect::DetectionResult {
