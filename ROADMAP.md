@@ -86,9 +86,11 @@ The safety and honesty foundation is in place:
   explicit, marked lossy flattening to the text `Message`. Remaining: compress
   text *inside* blocks while preserving tool ids and non-text blocks, and a
   block-aware pipeline path so hosts no longer flatten to a JSON string at all.
-- **Block-aware CCR payloads.** Let CCR store typed payloads (bytes + media type
-  + metadata), not only UTF-8 strings, so an undo can restore exact structured
-  content. Keep the string `save`/`retrieve` API as a convenience wrapper.
+- **Block-aware CCR payloads.** Shipped: `ccr::CcrPayload` plus
+  `CcrStore::save_payload` / `retrieve_payload` (default methods over the
+  existing text store), so a host can store and restore exact structured
+  originals. Remaining: native binary columns in the SQLite/fjall backends to
+  avoid the envelope's hex overhead for large binary payloads.
 - **Provider cache planning.** Shipped: OpenAI stable-prefix reports
   (`providers::openai`), Gemini cache candidates (`providers::gemini`), an
   Anthropic `cache_control` request renderer (`providers::anthropic`), and

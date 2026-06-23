@@ -6,6 +6,32 @@ pub mod sqlite;
 
 use async_trait::async_trait;
 use ogham_core::Result;
+use std::collections::HashMap;
+
+/// A typed CCR payload: raw bytes plus a media type and optional metadata.
+///
+/// Lets a host store an exact structured original (e.g. a serialized
+/// [`ogham_core::RichMessage`]) for lossless undo, not just UTF-8 text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CcrPayload {
+    /// Media type of `bytes`, e.g. `application/json` or `text/plain`.
+    pub media_type: String,
+    /// The original content bytes.
+    pub bytes: Vec<u8>,
+    /// Optional host metadata stored alongside the payload.
+    pub metadata: HashMap<String, String>,
+}
+
+impl CcrPayload {
+    /// Construct a UTF-8 text payload with the given media type.
+    pub fn text(media_type: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            media_type: media_type.into(),
+            bytes: text.into().into_bytes(),
+            metadata: HashMap::new(),
+        }
+    }
+}
 
 /// Pluggable CCR storage backend.
 #[async_trait]
@@ -13,6 +39,103 @@ pub trait CcrStore: Send + Sync {
     async fn save(&self, id: &str, original: &str, metadata: Option<&str>) -> Result<()>;
     async fn retrieve(&self, id: &str) -> Result<Option<String>>;
     async fn delete(&self, id: &str) -> Result<()>;
+
+    /// Save a typed payload.
+    ///
+    /// The default implementation serializes the payload into the text store as
+    /// a self-describing envelope, so every existing store gains payload support
+    /// with no changes. Backends with native binary columns may override it.
+    async fn save_payload(&self, id: &str, payload: &CcrPayload) -> Result<()> {
+        self.save(id, &encode_payload(payload), None).await
+    }
+
+    /// Retrieve a typed payload.
+    ///
+    /// Returns a `text/plain` payload when the id holds a plain string saved via
+    /// [`CcrStore::save`], so mixing the text and payload APIs degrades
+    /// gracefully rather than erroring.
+    async fn retrieve_payload(&self, id: &str) -> Result<Option<CcrPayload>> {
+        Ok(self
+            .retrieve(id)
+            .await?
+            .map(|stored| decode_payload(&stored)))
+    }
+}
+
+/// Marker key identifying a [`CcrPayload`] envelope inside the text store.
+const PAYLOAD_MARKER: &str = "ogham_ccr_payload";
+
+/// Serialize a payload into a self-describing JSON envelope. UTF-8 bytes are
+/// stored verbatim; binary bytes are hex-encoded so any payload round-trips.
+fn encode_payload(payload: &CcrPayload) -> String {
+    let (enc, data) = match std::str::from_utf8(&payload.bytes) {
+        Ok(text) => ("utf8", text.to_string()),
+        Err(_) => ("hex", to_hex(&payload.bytes)),
+    };
+    serde_json::json!({
+        PAYLOAD_MARKER: 1,
+        "media_type": payload.media_type,
+        "enc": enc,
+        "data": data,
+        "metadata": payload.metadata,
+    })
+    .to_string()
+}
+
+/// Decode a stored string into a payload, falling back to `text/plain` for a
+/// plain string that is not an envelope.
+fn decode_payload(stored: &str) -> CcrPayload {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(stored)
+        && value.get(PAYLOAD_MARKER).is_some()
+    {
+        let media_type = value["media_type"]
+            .as_str()
+            .unwrap_or("application/octet-stream")
+            .to_string();
+        let data = value["data"].as_str().unwrap_or("");
+        let bytes = match value["enc"].as_str() {
+            Some("hex") => from_hex(data),
+            _ => data.as_bytes().to_vec(),
+        };
+        let metadata = value["metadata"]
+            .as_object()
+            .map(|map| {
+                map.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        return CcrPayload {
+            media_type,
+            bytes,
+            metadata,
+        };
+    }
+    CcrPayload {
+        media_type: "text/plain; charset=utf-8".to_string(),
+        bytes: stored.as_bytes().to_vec(),
+        metadata: HashMap::new(),
+    }
+}
+
+fn to_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
+fn from_hex(s: &str) -> Vec<u8> {
+    s.as_bytes()
+        .chunks_exact(2)
+        .filter_map(|pair| {
+            let hi = (pair[0] as char).to_digit(16)?;
+            let lo = (pair[1] as char).to_digit(16)?;
+            Some(((hi << 4) | lo) as u8)
+        })
+        .collect()
 }
 
 /// Compute a canonical CCR content address for a payload.
@@ -60,5 +183,81 @@ mod tests {
     #[test]
     fn marker_format() {
         assert_eq!(marker_for("abc123"), "<<ccr:abc123>>");
+    }
+
+    #[tokio::test]
+    async fn payload_round_trips_text_and_binary() {
+        let store = in_memory::InMemoryCcrStore::new();
+
+        let mut metadata = HashMap::new();
+        metadata.insert("origin".to_string(), "tool".to_string());
+        let text = CcrPayload {
+            media_type: "application/json".to_string(),
+            bytes: br#"{"a":1}"#.to_vec(),
+            metadata,
+        };
+        store.save_payload("t", &text).await.unwrap();
+        assert_eq!(
+            store.retrieve_payload("t").await.unwrap().as_ref(),
+            Some(&text)
+        );
+
+        // Invalid UTF-8 must survive via hex encoding.
+        let binary = CcrPayload {
+            media_type: "application/octet-stream".to_string(),
+            bytes: vec![0xff, 0xfe, 0x00, 0x80],
+            metadata: HashMap::new(),
+        };
+        store.save_payload("b", &binary).await.unwrap();
+        assert_eq!(
+            store.retrieve_payload("b").await.unwrap().as_ref(),
+            Some(&binary)
+        );
+    }
+
+    #[tokio::test]
+    async fn retrieve_payload_on_plain_string_is_text() {
+        let store = in_memory::InMemoryCcrStore::new();
+        store.save("p", "just text", None).await.unwrap();
+        let payload = store.retrieve_payload("p").await.unwrap().unwrap();
+        assert_eq!(payload.bytes, b"just text");
+        assert!(payload.media_type.starts_with("text/plain"));
+    }
+
+    #[tokio::test]
+    async fn rich_message_blocks_restore_exactly_via_ccr() {
+        use ogham_core::{ContentBlock, RichMessage};
+
+        let store = in_memory::InMemoryCcrStore::new();
+        let original = RichMessage::blocks(
+            "assistant",
+            vec![
+                ContentBlock::ToolUse {
+                    id: "c1".to_string(),
+                    name: "shell".to_string(),
+                    input: serde_json::json!({ "cmd": "ls" }),
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "c1".to_string(),
+                    is_error: false,
+                    content: vec![ContentBlock::Text {
+                        text: "out".to_string(),
+                    }],
+                },
+            ],
+        );
+        let json = serde_json::to_string(&original).unwrap();
+        store
+            .save_payload("m", &CcrPayload::text("application/json", json))
+            .await
+            .unwrap();
+
+        let restored_bytes = store.retrieve_payload("m").await.unwrap().unwrap().bytes;
+        let restored: RichMessage =
+            serde_json::from_str(&String::from_utf8(restored_bytes).unwrap()).unwrap();
+        assert_eq!(
+            restored, original,
+            "tool ids and structure must survive CCR"
+        );
     }
 }

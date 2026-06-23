@@ -9,6 +9,13 @@ versions may contain breaking changes).
 
 ### Added
 
+- Block-aware CCR payloads: `ccr::CcrPayload` (media type + bytes + metadata)
+  with `CcrStore::save_payload` / `retrieve_payload` default methods, so every
+  store can persist and restore exact structured originals (e.g. serialized
+  `RichMessage` blocks) for lossless undo. The default impl wraps the payload in
+  a self-describing envelope over the text store (UTF-8 verbatim, binary
+  hex-encoded); `retrieve_payload` degrades a plain string to a `text/plain`
+  payload.
 - `ogham_core::content`: a host-neutral rich message model — `RichMessage`,
   `MessageContent` (text or blocks), and `ContentBlock`
   (text/thinking/image/tool-use/tool-result/reference). It round-trips
