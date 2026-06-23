@@ -482,8 +482,8 @@ impl SmartCrusher {
     /// Compress JSON content recursively.
     ///
     /// `_query` is accepted for forward compatibility with focus/question-hint
-    /// biased compression but is currently ignored (status 2026-06-23). See
-    /// `docs/remediation-strategy-2026-06-23.md` (Patch Boundary Status).
+    /// biased compression but is currently ignored. See `ROADMAP.md`
+    /// ("Consume the focus hint").
     pub fn crush(&self, content: &str, _query: &str, bias: f64) -> String {
         self.crush_with_options(content, bias, false).0
     }

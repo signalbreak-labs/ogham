@@ -1,0 +1,158 @@
+# Ogham Roadmap
+
+Ogham is a pure-Rust, in-process SDK for LLM context engineering: deterministic
+compression, reversible clearing (CCR), agent-aware pruning, token budgeting, and
+cache-aware prompt shaping. It runs entirely in the host process — no sidecar, no
+network calls, no background tasks.
+
+This document describes where Ogham is, where it is going, and the principles
+that constrain how it gets there. It is a living plan, not a contract; see
+`CHANGELOG.md` for what has actually shipped.
+
+## What Ogham is — and is not
+
+Ogham aims to be:
+
+1. A pure-Rust dependency a host application can vendor or path-depend on without
+   starting a daemon.
+2. A deterministic compression and compaction engine with fail-closed semantics.
+3. A fold/CCR engine that returns durable, auditable records — not just opaque
+   marker strings.
+4. A provider-aware cache planner that protects stable prefixes and emits
+   provider-specific annotations.
+5. A bridge between generic chat messages and richer, block-structured agent
+   messages.
+6. A token-budget gate that returns `BudgetExceeded` rather than emitting an
+   oversized prompt.
+7. A library with a small default dependency footprint and feature gates for the
+   heavier backends and compressors.
+
+Ogham is deliberately **not**:
+
+1. A replacement for provider-side prompt caching or context editing.
+2. A default LLM-summarization service (model-assisted compression is opt-in).
+3. A hidden background-task system that marks content retrievable before storage
+   succeeds.
+4. A lossy serializer of a host's rich message format.
+5. A universal tokenizer crate or provider HTTP client.
+
+## Current status
+
+The safety and honesty foundation is in place:
+
+- **Honest public API.** `default_pipeline()` registers the built-in compressors
+  with an in-memory CCR store; `empty_pipeline()` is the explicit empty
+  constructor. `CompressConfig` honors every field (`reversible`,
+  `use_cache_aligner`, `compressors` allowlist, `ccr_store_path`).
+- **Fail-closed CCR.** Reversible saves are awaited before a marker is emitted; a
+  save failure keeps the original content rather than producing an unretrievable
+  marker. There are no detached background saves.
+- **Agent-aware rules.** Stale successful tool results are cleared to retrievable
+  CCR stubs; errors, system prompts, the latest user query, pinned messages, and
+  a token-budgeted protected tail are never touched.
+- **Budget cascade.** Compression → summarization → pair-safe dropping, failing
+  closed with `BudgetExceeded` instead of overflowing. Assistant/tool-call pairs
+  are dropped atomically so no orphaned tool results reach the provider.
+- **First-class compaction results.** `compact_conversation()` returns
+  `FoldRecord`s (cleared / compressed / summarized / dropped), a protected-tail
+  report, optional budget/agent reports, and provider cache annotations — so
+  hosts never have to scrape marker strings to infer what happened.
+- **Honest token counting.** Heuristic estimates carry an explicit safety margin;
+  exact OpenAI counts are available behind the `tiktoken` feature. Estimated
+  counts are never presented as exact.
+
+## Roadmap
+
+### Near-term: correctness and dependency hygiene
+
+- **Feature-gate dependency weight.** Split the heavy or situational backends and
+  compressors behind features so the default build is lean. Target gates include
+  the SQLite and embedded-KV stores, the regex-backed log stripper, the
+  flate2-based size validator, the TOON encoder, and the HTTP server. `ogham`'s
+  core compression and in-memory CCR should pull none of these by default.
+- **Versioned, collision-resistant CCR IDs.** Replace the legacy MD5 content
+  address with a versioned, modern hash so CCR keys are suitable as durable,
+  public content addresses, while continuing to retrieve content stored under the
+  older scheme.
+- **Consume the focus hint.** The focus / question hint is plumbed from
+  `CompactConfig.focus` through `CompressionContext.question_hint`. Make a
+  built-in compressor actually bias on it (e.g. ranking which records to keep)
+  and thread it through the conversation-level budget cascade, without ever
+  overriding protected content.
+- **Enforce `keep_recent_assistant`.** Treat the most-recent N assistant replies
+  as a protected window in the agent and budget passes, matching the documented
+  policy.
+
+### Mid-term: richer host content and provider planning
+
+- **Host-neutral rich content model.** Add a block-structured message
+  representation (text, thinking, image, tool-use, tool-result, references)
+  alongside the current flat `Message`, so hosts no longer have to flatten
+  structured content into a JSON string before compression. Conversions are
+  explicit and lossy paths are marked.
+- **Block-aware CCR payloads.** Let CCR store typed payloads (bytes + media type
+  + metadata), not only UTF-8 strings, so an undo can restore exact structured
+  content. Keep the string `save`/`retrieve` API as a convenience wrapper.
+- **Provider cache planning.** Return a `CachePlan` describing stable-prefix
+  spans, provider-specific annotations, and risk notes. Render Anthropic
+  `cache_control` breakpoints; report OpenAI stable-prefix boundaries without
+  inventing request fields; add Gemini cache-candidate spans. Ogham emits plans —
+  hosts own the HTTP calls and auth.
+- **Token-counter reporting.** Distinguish `Exact`, `Estimated { method,
+  safety_margin }`, and `ProviderReported` counts, add a model-family counter
+  registry, and surface safety margins in `BudgetReport`.
+
+### Longer-term: optional power features
+
+- **Selective structured encodings.** Keep TOON-style encodings optional and
+  content-type gated; apply only to uniform arrays after validation, always
+  preserving the CCR original and benchmarking against tokenizer counts rather
+  than byte length.
+- **Model-assisted compression boundary.** Define a `ModelAssistedCompressor`
+  trait / feature boundary for aggressive (e.g. LLMLingua-style) compression so
+  the default path stays deterministic and zero-network. Require evaluation gates
+  before enabling semantic token dropping on tool, error, or system content.
+- **Retrieval-friendly metadata.** Tag folded content and summaries with file
+  paths, command/tool names, error classes, and symbol-like identifiers so host
+  retrieval/memory systems can index them. Ogham integrates with retrieval; it
+  does not become a vector database.
+
+## Context landscape
+
+Local compression is one layer of a larger stack: provider prompt caching,
+provider context editing, retrieval for large static corpora, structured
+summaries, and cache-prefix stability all matter. Two consequences shape the
+roadmap:
+
+- **Protect stable prefixes, not just token count.** A pass that lowers tokens
+  but breaks a cacheable prefix can increase real cost and latency. Cache savings
+  and token savings are reported separately.
+- **Optimize for recall per token, not ratio alone.** For coding and agent
+  workloads the valuable working set is the current task, recent tool results,
+  active diffs, constraints, and unresolved errors. Old successful tool outputs
+  are the ideal CCR/fold candidates; instructions and errors stay raw.
+
+## Design principles
+
+| Principle | Rationale |
+|---|---|
+| Pure Rust, in-process. | An optimal dependency should not require an HTTP sidecar. |
+| Deterministic default compression. | Agent context carries instructions and errors where probabilistic compression is risky. |
+| Provider plans, not provider clients. | Provider APIs change quickly; hosts own HTTP calls and auth. |
+| Fold records are first-class. | UIs, ledgers, and undo must not depend on scraping marker strings. |
+| Preserve rich blocks. | Agent semantics live below the message text. |
+| Feature-gate heavy components. | Dependency weight matters across many consumers. |
+| Versioned, collision-resistant IDs. | Durable content addresses should not rely on a broken hash. |
+
+## Risk register
+
+| Risk | Severity | Why it matters | Mitigation |
+|---|---:|---|---|
+| Unretrievable CCR markers | Critical | Breaks undo and the fail-closed promise. | Await saves; emit no marker on save failure. |
+| Rich-content loss | Critical | Tool calls, images, and references can collapse to text. | Block-aware content model and payload CCR. |
+| Config/docs mismatch | High | Users depend on behavior that is not implemented. | Honest defaults, named APIs, config tests. |
+| Cache damage despite token savings | High | Provider cost/latency can worsen if stable prefixes change. | `CachePlan` and stable-prefix protection. |
+| Over-aggressive semantic compression | High | Loses instructions/errors agents need. | Deterministic default; model-assisted compressors are opt-in. |
+| Weak content-address hash | Medium | Poor durable/public content-address story. | Versioned, collision-resistant IDs with legacy retrieval. |
+| Dependency bloat | Medium | Makes Ogham less optimal as a dependency. | Feature-gate stores, compressors, and server. |
+| Estimated counts presented as exact | Medium | Budget errors and overconfident stats. | Count-kind reporting and provider-specific counters. |

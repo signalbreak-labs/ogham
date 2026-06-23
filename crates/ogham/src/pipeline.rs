@@ -154,12 +154,12 @@ impl DefaultCompressionPipeline {
     /// Configure an optional focus/question hint passed to compressors via
     /// [`ogham_core::CompressionContext::question_hint`].
     ///
-    /// NOTE (status 2026-06-23): the hint is plumbed end to end and reaches
-    /// every compressor, but no built-in compressor consumes it yet
-    /// (`SmartCrusher::crush` still ignores its `_query` argument), so setting
-    /// it is currently a no-op on output. It is wired now so hosts can pass
-    /// focus without an API change once focus-biased compression lands. See
-    /// `docs/remediation-strategy-2026-06-23.md` (Patch Boundary Status).
+    /// On the direct `pipeline.run()` path the hint is copied into every routed
+    /// compressor's `CompressionContext`, but no built-in compressor consumes it
+    /// yet (`SmartCrusher::crush` ignores its `_query` argument), so setting it is
+    /// currently a no-op on output. It is wired so hosts can pass focus without an
+    /// API change once focus-biased compression lands. See `ROADMAP.md`
+    /// ("Consume the focus hint").
     pub fn with_question_hint(mut self, question_hint: Option<String>) -> Self {
         self.question_hint = question_hint;
         self

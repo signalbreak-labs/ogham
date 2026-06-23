@@ -75,9 +75,9 @@ pub struct CompactConfig {
     /// Optional focus/question hint forwarded to compressors via
     /// `CompressionContext::question_hint`.
     ///
-    /// Status 2026-06-23: plumbed end to end but not yet consumed by any
-    /// built-in compressor, so it currently does not change output. See
-    /// `docs/remediation-strategy-2026-06-23.md` (Patch Boundary Status).
+    /// The hint is plumbed end to end but is not yet consumed by any built-in
+    /// compressor, so it does not change output today. See `ROADMAP.md`
+    /// ("Consume the focus hint").
     pub focus: Option<String>,
 }
 
