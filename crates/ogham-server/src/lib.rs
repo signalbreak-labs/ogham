@@ -126,7 +126,7 @@ impl Default for AppState {
 /// // POST /compress   request:  {"messages":[{"role":"user","content":"..."}]}
 /// //                  response: {"messages":[...], "stats":{"original_tokens":N,
 /// //                             "compressed_tokens":N,"ratio":F,"compressor_used":"..."}}
-/// // POST /retrieve   request:  {"id":"<md5hex>"}
+/// // POST /retrieve   request:  {"id":"<ccr-id>"}
 /// //                  response: {"found":true,"original":"..."} or {"found":false}
 /// // POST /detect     request:  {"content":"..."}
 /// //                  response: {"content_type":"json_array","confidence":0.9}

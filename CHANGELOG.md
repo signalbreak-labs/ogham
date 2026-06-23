@@ -21,6 +21,11 @@ versions may contain breaking changes).
 
 ### Changed
 
+- CCR content addresses (`ccr::compute_key`) are now versioned, collision-resistant
+  BLAKE3 keys of the form `b3:<32 hex>` instead of bare MD5. The `b3:` tag lets the
+  hash scheme evolve unambiguously; stores key on the literal id, so content saved
+  under an older scheme stays retrievable. Emitted `<<ccr:...>>` markers change
+  accordingly.
 - The focus / question hint (`CompactConfig.focus`,
   `DefaultCompressionPipeline::with_question_hint()`) is now consumed:
   `SmartCrusher` boosts records whose serialized form matches the hint so they

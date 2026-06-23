@@ -28,9 +28,9 @@ tracing = { workspace = true }
 
 tiktoken-rs = { version = "0.12", optional = true }
 
+blake3 = "1"
 fjall = "2"
 regex = "1"
-aho-corasick = "1"
 md5 = "0.8"
 flate2 = "1"
 rusqlite = { version = ">=0.38, <0.41", features = ["bundled"] }
