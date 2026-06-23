@@ -9,6 +9,13 @@ versions may contain breaking changes).
 
 ### Added
 
+- `ogham_core::content`: a host-neutral rich message model — `RichMessage`,
+  `MessageContent` (text or blocks), and `ContentBlock`
+  (text/thinking/image/tool-use/tool-result/reference). It round-trips
+  losslessly through serde, so a host can map its structured messages in without
+  flattening to a JSON string. `RichMessage::to_flat_lossy()` renders blocks to
+  text for the text pipeline and marks the result with `META_FLATTENED` so the
+  lossy path is explicit. Re-exported from `ogham`.
 - Provider cache planning across `providers`:
   - `providers::openai` — `stable_prefix_report()` reports the cacheable
     stable-prefix boundary, whether it clears OpenAI's ~1024-token auto-cache

@@ -18,10 +18,12 @@
 //! - **Metadata tags:** agent semantics ride on
 //!   [`Message::metadata`] using the namespaced keys in [`meta_keys`].
 
+pub mod content;
 pub mod error;
 pub mod metrics;
 pub mod token;
 
+pub use content::{ContentBlock, ImageSource, META_FLATTENED, MessageContent, RichMessage};
 pub use error::{OghamError, Result};
 pub use metrics::{
     CompressionEvent, Metrics, NoopMetrics, NoopObserver, Observer, PerCompressorStats,
