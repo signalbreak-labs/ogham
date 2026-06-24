@@ -137,140 +137,238 @@ pub fn render_cache_control(messages: &[Message]) -> AnthropicMessages {
 /// carry) and `Reference` (rendered as `[kind: id_or_path]`).
 ///
 /// Roles follow the Messages API: `system` messages become top-level `system`
-/// blocks; `assistant` stays `assistant`; every other role (including `tool`)
-/// becomes a `user` turn, which is where Anthropic expects `tool_result` blocks.
-/// Block placement is enforced for the resolved role — a `tool_use` outside an
-/// assistant turn or a `tool_result` outside a user turn is linearized to text —
-/// so a mislabeled message can never produce a provider-invalid request.
-/// When a message carries the `cache_control` annotation, the breakpoint is
-/// placed on its **last** block (so the whole message is within the cached
-/// prefix). Messages that render to no blocks are skipped.
+/// blocks (text only); `assistant` stays `assistant`; every other role
+/// (including `tool`) is a user turn, where Anthropic expects `tool_result`s.
+/// To satisfy Anthropic's strict alternation and tool-pairing rules, consecutive
+/// same-side messages are **coalesced into one turn** — so a parallel tool
+/// call's results, even when delivered as several separate `tool`-role messages,
+/// land in a single user turn, with all `tool_result` blocks before any text.
+/// A `tool_use` is rendered natively only if the immediately following user turn
+/// answers it (a dangling call is linearized to text); a `tool_result` only if
+/// the immediately preceding assistant turn issued its `tool_use` (orphan, late,
+/// or duplicate results are linearized to text). When any source message of a
+/// coalesced turn carries the `cache_control` annotation, the breakpoint is
+/// placed on that turn's **last** block. Turns that render to no blocks are
+/// skipped.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Side {
+    Assistant,
+    User,
+}
+
+/// One Anthropic turn-to-be: consecutive same-side source messages, coalesced so
+/// the rendered `messages` array strictly alternates user/assistant and a
+/// parallel tool call's results land in a single user turn.
+struct Segment<'a> {
+    side: Side,
+    msgs: Vec<&'a RichMessage>,
+    cache: bool,
+}
+
 pub fn render_cache_control_rich(messages: &[RichMessage]) -> AnthropicMessages {
     let mut system = Vec::new();
-    let mut turns = Vec::new();
-    // Tool-call ids from the preceding assistant turn that a `tool_result` may
-    // answer. An assistant turn resets it to exactly that turn's tool_use ids;
-    // user/tool turns consume from it (so parallel results delivered across
-    // several consecutive tool-role messages all resolve); a system turn clears
-    // it. So only results that follow their tool_use (before the next assistant
-    // turn) render natively.
-    let mut pending_tool_use: HashSet<String> = HashSet::new();
+    // Pass 1: split system messages to the top-level field and coalesce the
+    // remaining messages into alternating turn segments.
+    let mut segments: Vec<Segment> = Vec::new();
     for m in messages {
-        // Anthropic role: system goes to the top-level field; assistant stays
-        // assistant; everything else (incl. `tool`) is a user turn.
-        let role = match m.role.as_str() {
-            "system" => "system",
-            "assistant" => "assistant",
-            _ => "user",
+        if m.role == "system" {
+            let mut blocks = render_system_blocks(&m.content);
+            if blocks.is_empty() {
+                continue;
+            }
+            if m.metadata.contains_key(meta_keys::CACHE_CONTROL)
+                && let Some(last) = blocks.last_mut()
+            {
+                last["cache_control"] = json!({ "type": "ephemeral" });
+            }
+            system.extend(blocks);
+            continue;
+        }
+        let side = if m.role == "assistant" {
+            Side::Assistant
+        } else {
+            Side::User
         };
-        let mut blocks = match role {
-            "assistant" => render_assistant_content(&m.content, &mut pending_tool_use),
-            "user" => render_user_content(&m.content, &mut pending_tool_use),
-            _ => {
-                pending_tool_use.clear();
-                render_system_content(&m.content)
+        let cache = m.metadata.contains_key(meta_keys::CACHE_CONTROL);
+        match segments.last_mut() {
+            Some(seg) if seg.side == side => {
+                seg.msgs.push(m);
+                seg.cache |= cache;
+            }
+            _ => segments.push(Segment {
+                side,
+                msgs: vec![m],
+                cache,
+            }),
+        }
+    }
+
+    // Pass 2: render each segment, pairing tool_use with the immediately
+    // following user turn's results.
+    let mut turns = Vec::new();
+    for i in 0..segments.len() {
+        let seg = &segments[i];
+        let mut blocks = match seg.side {
+            Side::Assistant => {
+                // A tool_use is native only if the very next turn is a user turn
+                // that answers it; otherwise it is a dangling call -> text.
+                let answered = match segments.get(i + 1) {
+                    Some(next) if next.side == Side::User => collect_tool_result_ids(next),
+                    _ => HashSet::new(),
+                };
+                render_assistant_segment(seg, &answered)
+            }
+            Side::User => {
+                // A tool_result is native only if the immediately preceding turn
+                // is an assistant turn whose tool_use it answers.
+                let mut pending = match i.checked_sub(1).map(|p| &segments[p]) {
+                    Some(prev) if prev.side == Side::Assistant => collect_tool_use_ids(prev),
+                    _ => HashSet::new(),
+                };
+                render_user_segment(seg, &mut pending)
             }
         };
         if blocks.is_empty() {
             continue;
         }
-        if m.metadata.contains_key(meta_keys::CACHE_CONTROL)
+        if seg.cache
             && let Some(last) = blocks.last_mut()
         {
             last["cache_control"] = json!({ "type": "ephemeral" });
         }
-        if role == "system" {
-            system.extend(blocks);
-        } else {
-            turns.push(json!({ "role": role, "content": blocks }));
-        }
+        let role = match seg.side {
+            Side::Assistant => "assistant",
+            Side::User => "user",
+        };
+        turns.push(json!({ "role": role, "content": blocks }));
     }
+
     AnthropicMessages {
         system,
         messages: turns,
     }
 }
 
-/// Render an assistant turn. `tool_use` is native; its id becomes answerable by
-/// the next user turn (`pending` is reset to exactly this turn's ids). A
-/// `tool_result` is invalid in an assistant turn and is linearized to text.
-fn render_assistant_content(content: &MessageContent, pending: &mut HashSet<String>) -> Vec<Value> {
-    pending.clear();
-    match content {
-        MessageContent::Text(text) => vec![json!({ "type": "text", "text": text })],
-        MessageContent::Blocks(blocks) => {
-            let mut out = Vec::with_capacity(blocks.len());
-            for block in blocks {
-                match block {
-                    ContentBlock::ToolUse { id, .. } => {
-                        pending.insert(id.clone());
-                        out.push(render_block(block));
-                    }
-                    ContentBlock::ToolResult { tool_use_id, .. } => out.push(
-                        json!({ "type": "text", "text": format!("[tool_result for {tool_use_id}]") }),
-                    ),
-                    _ => out.push(render_block(block)),
+fn collect_tool_use_ids(seg: &Segment) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    for m in &seg.msgs {
+        if let MessageContent::Blocks(blocks) = &m.content {
+            for b in blocks {
+                if let ContentBlock::ToolUse { id, .. } = b {
+                    ids.insert(id.clone());
                 }
             }
-            out
         }
     }
+    ids
 }
 
-/// Render a user turn. A `tool_result` is native only if it answers an
-/// outstanding tool_use from the preceding assistant turn (consumed so
-/// duplicates demote); all native results are emitted *before* any other block,
-/// as Anthropic requires. Everything else — orphan/duplicate results, a
-/// misplaced `tool_use` — is linearized to text. `pending` is **not** cleared
-/// here: a host may deliver the results of one parallel-tool-call turn as
-/// several consecutive tool-role messages, so outstanding ids stay answerable
-/// until the next assistant/system turn resets them.
-fn render_user_content(content: &MessageContent, pending: &mut HashSet<String>) -> Vec<Value> {
-    match content {
-        MessageContent::Text(text) => vec![json!({ "type": "text", "text": text })],
-        MessageContent::Blocks(blocks) => {
-            let mut results = Vec::new();
-            let mut others = Vec::new();
-            for block in blocks {
-                match block {
-                    ContentBlock::ToolResult { tool_use_id, .. } if pending.remove(tool_use_id) => {
-                        results.push(render_block(block));
-                    }
-                    ContentBlock::ToolResult {
-                        tool_use_id,
-                        content,
-                        ..
-                    } => others.push(json!({
-                        "type": "text",
-                        "text": format!("[tool_result for {tool_use_id}]{}", tool_result_text(content)),
-                    })),
-                    ContentBlock::ToolUse { id, name, .. } => others.push(
-                        json!({ "type": "text", "text": format!("[tool_use {name} ({id})]") }),
-                    ),
-                    _ => others.push(render_block(block)),
+fn collect_tool_result_ids(seg: &Segment) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    for m in &seg.msgs {
+        if let MessageContent::Blocks(blocks) = &m.content {
+            for b in blocks {
+                if let ContentBlock::ToolResult { tool_use_id, .. } = b {
+                    ids.insert(tool_use_id.clone());
                 }
             }
-            results.extend(others);
-            results
         }
     }
+    ids
 }
 
-/// Render a system message's content. System content is text; any stray tool
-/// block is linearized to text so the top-level `system` field stays valid.
-fn render_system_content(content: &MessageContent) -> Vec<Value> {
+/// Render a coalesced assistant turn. A `tool_use` is native only if `answered`
+/// (the next user turn answers it); a dangling one and any stray `tool_result`
+/// are linearized to text.
+fn render_assistant_segment(seg: &Segment, answered: &HashSet<String>) -> Vec<Value> {
+    let mut out = Vec::new();
+    for m in &seg.msgs {
+        match &m.content {
+            MessageContent::Text(text) => out.push(json!({ "type": "text", "text": text })),
+            MessageContent::Blocks(blocks) => {
+                for block in blocks {
+                    match block {
+                        ContentBlock::ToolUse { id, name, .. } => {
+                            if answered.contains(id) {
+                                out.push(render_block(block));
+                            } else {
+                                out.push(json!({ "type": "text", "text": format!("[tool_use {name} ({id})]") }));
+                            }
+                        }
+                        ContentBlock::ToolResult { tool_use_id, .. } => out.push(
+                            json!({ "type": "text", "text": format!("[tool_result for {tool_use_id}]") }),
+                        ),
+                        _ => out.push(render_block(block)),
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Render a coalesced user turn. Native `tool_result`s (answering an outstanding
+/// tool_use from the preceding assistant turn, consumed so duplicates demote)
+/// are emitted *before* any other block, as Anthropic requires; orphan/duplicate
+/// results and a misplaced `tool_use` are linearized to text.
+fn render_user_segment(seg: &Segment, pending: &mut HashSet<String>) -> Vec<Value> {
+    let mut results = Vec::new();
+    let mut others = Vec::new();
+    for m in &seg.msgs {
+        match &m.content {
+            MessageContent::Text(text) => others.push(json!({ "type": "text", "text": text })),
+            MessageContent::Blocks(blocks) => {
+                for block in blocks {
+                    match block {
+                        ContentBlock::ToolResult { tool_use_id, .. }
+                            if pending.remove(tool_use_id) =>
+                        {
+                            results.push(render_block(block));
+                        }
+                        ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            ..
+                        } => others.push(json!({
+                            "type": "text",
+                            "text": format!("[tool_result for {tool_use_id}]{}", tool_result_text(content)),
+                        })),
+                        ContentBlock::ToolUse { id, name, .. } => others.push(
+                            json!({ "type": "text", "text": format!("[tool_use {name} ({id})]") }),
+                        ),
+                        _ => others.push(render_block(block)),
+                    }
+                }
+            }
+        }
+    }
+    results.extend(others);
+    results
+}
+
+/// Render a system message's content as text-only blocks: Anthropic's top-level
+/// `system` field accepts only text, so images and tool blocks are linearized.
+fn render_system_blocks(content: &MessageContent) -> Vec<Value> {
     match content {
         MessageContent::Text(text) => vec![json!({ "type": "text", "text": text })],
         MessageContent::Blocks(blocks) => blocks
             .iter()
             .map(|block| match block {
+                ContentBlock::Text { text } | ContentBlock::Thinking { text } => {
+                    json!({ "type": "text", "text": text })
+                }
+                ContentBlock::Image { alt, .. } => {
+                    json!({ "type": "text", "text": alt.clone().unwrap_or_else(|| "[image]".to_string()) })
+                }
                 ContentBlock::ToolUse { id, name, .. } => {
                     json!({ "type": "text", "text": format!("[tool_use {name} ({id})]") })
                 }
                 ContentBlock::ToolResult { tool_use_id, .. } => {
                     json!({ "type": "text", "text": format!("[tool_result for {tool_use_id}]") })
                 }
-                _ => render_block(block),
+                ContentBlock::Reference {
+                    kind, id_or_path, ..
+                } => json!({ "type": "text", "text": format!("[{kind}: {id_or_path}]") }),
             })
             .collect(),
     }
@@ -674,19 +772,56 @@ mod tests {
 
     #[test]
     fn tool_result_after_intervening_turn_is_demoted() {
-        // tool_use, then a non-answering assistant turn, then the result: the
-        // result no longer immediately follows its tool_use, so it is demoted.
-        let intervening = RichMessage::text("assistant", "still thinking");
-        let user = RichMessage::blocks("user", vec![tool_result_block("call_1", "late")]);
-        let rendered = render_cache_control_rich(&[tool_use_msg("call_1"), intervening, user]);
-        let content = &rendered.messages[2]["content"];
-        assert_eq!(content[0]["type"], "text");
+        // tool_use, then a full user+assistant cycle, then the result: it no
+        // longer immediately follows its tool_use turn, so it is demoted.
+        let mid_user = RichMessage::text("user", "unrelated");
+        let mid_assistant = RichMessage::text("assistant", "ok");
+        let late = RichMessage::blocks("tool", vec![tool_result_block("call_1", "late")]);
+        let rendered =
+            render_cache_control_rich(&[tool_use_msg("call_1"), mid_user, mid_assistant, late]);
+        let last = rendered.messages.last().unwrap();
+        assert_eq!(last["role"], "user");
+        assert_eq!(last["content"][0]["type"], "text");
         assert!(
-            content[0]["text"]
+            last["content"][0]["text"]
                 .as_str()
                 .unwrap()
                 .contains("[tool_result for call_1]")
         );
+    }
+
+    #[test]
+    fn dangling_tool_use_with_no_result_is_demoted() {
+        // An assistant tool_use that no following user turn answers must not
+        // render natively (Anthropic would reject the dangling call).
+        let assistant = tool_use_msg("call_1");
+        let user = RichMessage::text("user", "never sent the tool result");
+        let rendered = render_cache_control_rich(&[assistant, user]);
+        let a = &rendered.messages[0]["content"][0];
+        assert_eq!(a["type"], "text");
+        assert_eq!(a["text"], "[tool_use shell (call_1)]");
+    }
+
+    #[test]
+    fn system_image_block_is_linearized_to_text() {
+        // Anthropic's top-level system field accepts only text; an image in a
+        // system message must not render as a native image block.
+        let system = RichMessage::blocks(
+            "system",
+            vec![
+                ContentBlock::Text {
+                    text: "rules".into(),
+                },
+                ContentBlock::Image {
+                    source: ImageSource::Url { url: "x".into() },
+                    alt: Some("a diagram".into()),
+                },
+            ],
+        );
+        let rendered = render_cache_control_rich(&[system]);
+        assert_eq!(rendered.system.len(), 2);
+        assert!(rendered.system.iter().all(|b| b["type"] == "text"));
+        assert_eq!(rendered.system[1]["text"], "a diagram");
     }
 
     #[test]
@@ -711,11 +846,18 @@ mod tests {
         let result_a = RichMessage::blocks("tool", vec![tool_result_block("a", "ra")]);
         let result_b = RichMessage::blocks("tool", vec![tool_result_block("b", "rb")]);
         let rendered = render_cache_control_rich(&[assistant, result_a, result_b]);
-        assert_eq!(rendered.messages.len(), 3);
-        assert_eq!(rendered.messages[1]["content"][0]["type"], "tool_result");
-        assert_eq!(rendered.messages[1]["content"][0]["tool_use_id"], "a");
-        assert_eq!(rendered.messages[2]["content"][0]["type"], "tool_result");
-        assert_eq!(rendered.messages[2]["content"][0]["tool_use_id"], "b");
+        // The two tool-role messages coalesce into one user turn (Anthropic
+        // requires alternation), with both results native and batched.
+        assert_eq!(rendered.messages.len(), 2);
+        assert_eq!(rendered.messages[1]["role"], "user");
+        let content = rendered.messages[1]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert!(content.iter().all(|b| b["type"] == "tool_result"));
+        let ids: Vec<&str> = content
+            .iter()
+            .map(|b| b["tool_use_id"].as_str().unwrap())
+            .collect();
+        assert!(ids.contains(&"a") && ids.contains(&"b"));
     }
 
     #[test]
@@ -803,13 +945,16 @@ mod tests {
         );
         let rendered = render_cache_control_rich(&[base64, url]);
 
-        let img0 = &rendered.messages[0]["content"][0];
+        // The two consecutive user image messages coalesce into one user turn.
+        assert_eq!(rendered.messages.len(), 1);
+        let content = &rendered.messages[0]["content"];
+        let img0 = &content[0];
         assert_eq!(img0["type"], "image");
         assert_eq!(img0["source"]["type"], "base64");
         assert_eq!(img0["source"]["media_type"], "image/png");
         assert_eq!(img0["source"]["data"], "AAAA");
 
-        let img1 = &rendered.messages[1]["content"][0];
+        let img1 = &content[1];
         assert_eq!(img1["source"]["type"], "url");
         assert_eq!(img1["source"]["url"], "https://example.com/x.png");
     }
