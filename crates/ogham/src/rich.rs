@@ -296,7 +296,14 @@ pub async fn compact_rich(
         })
         .collect();
 
-    let mut folds = build_fold_records(&input_flats, &mut working, &saved, counter.as_ref());
+    let dropped: &[Message] = budget_report.as_ref().map_or(&[], |r| r.dropped.as_slice());
+    let mut folds = build_fold_records(
+        &input_flats,
+        &mut working,
+        &saved,
+        dropped,
+        counter.as_ref(),
+    );
     let cache_plan =
         apply_cache_policy(&mut working, config.cache, counter.as_ref(), &mut warnings);
 

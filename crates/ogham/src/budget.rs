@@ -40,6 +40,10 @@ pub struct BudgetReport {
     /// The fractional safety margin actually applied to derive `effective_limit`
     /// from `ContextBudget::total_limit`.
     pub safety_margin: f64,
+    /// Messages removed by the drop step, in their final (e.g. cleared-stub)
+    /// state. Used to attribute a `Dropped` fold's CCR id when a message was
+    /// cleared before being dropped.
+    pub dropped: Vec<Message>,
 }
 
 /// Make `messages` fit `budget`. Mutates in place. Fail-closed per step;
@@ -209,6 +213,7 @@ pub async fn enforce_budget(
         if let Some((start, end)) = droppable_group {
             let removed: Vec<Message> = messages.drain(start..end).collect();
             running = running.saturating_sub(counter.count_messages(&removed));
+            report.dropped.extend(removed);
             if running <= effective_limit {
                 // Authoritative recount before exiting the loop, in case the
                 // counter is not strictly additive across messages.

@@ -203,10 +203,12 @@ pub async fn compact_conversation(
         );
     }
 
+    let dropped: &[Message] = budget_report.as_ref().map_or(&[], |r| r.dropped.as_slice());
     let folds = build_fold_records(
         &original,
         &mut working,
         &saved_internal_values,
+        dropped,
         counter.as_ref(),
     );
     let cache_plan =
@@ -283,6 +285,7 @@ pub(crate) fn build_fold_records(
     original: &[Message],
     compacted: &mut [Message],
     saved_internal_values: &[Option<String>],
+    dropped: &[Message],
     counter: &dyn TokenCounter,
 ) -> Vec<FoldRecord> {
     let mut folds = Vec::new();
@@ -332,12 +335,20 @@ pub(crate) fn build_fold_records(
     }
 
     for idx in missing {
+        // If the dropped message was cleared first, recover its CCR id from the
+        // dropped stub so the audit record still points at the stored original.
+        let dropped_stub = dropped.iter().find(|m| {
+            m.metadata
+                .get(ORIGINAL_INDEX_KEY)
+                .and_then(|raw| raw.parse::<usize>().ok())
+                == Some(idx)
+        });
         folds.push(fold_for_span(
             FoldKind::Dropped,
             idx..idx + 1,
             None,
             &original[idx..idx + 1],
-            None,
+            dropped_stub,
             counter,
         ));
     }
@@ -724,7 +735,13 @@ mod tests {
             .insert(meta_keys::CCR_ID.to_string(), "top-level-id".to_string());
         let counter = crate::token_counter::HeuristicCounter::new();
 
-        let folds = build_fold_records(&original, &mut tagged, &saved_internal_values, &counter);
+        let folds = build_fold_records(
+            &original,
+            &mut tagged,
+            &saved_internal_values,
+            &[],
+            &counter,
+        );
 
         assert_eq!(folds.len(), 1);
         assert_eq!(folds[0].kind, FoldKind::Compressed);
@@ -749,12 +766,50 @@ mod tests {
         ];
         let counter = crate::token_counter::HeuristicCounter::new();
 
-        let folds = build_fold_records(&original, &mut compacted, &saved_internal_values, &counter);
+        let folds = build_fold_records(
+            &original,
+            &mut compacted,
+            &saved_internal_values,
+            &[],
+            &counter,
+        );
 
         assert_eq!(folds.len(), 2);
         assert_eq!(folds[0].kind, FoldKind::Summarized);
         assert_eq!(folds[0].original_range, 0..2);
         assert_eq!(folds[1].kind, FoldKind::Dropped);
         assert_eq!(folds[1].original_range, 4..5);
+    }
+
+    #[test]
+    fn dropped_fold_recovers_ccr_id_from_a_cleared_then_dropped_stub() {
+        let original = vec![Message::new("tool", "the verbatim tool output")];
+        let mut tagged = original.clone();
+        let saved = tag_original_indices(&mut tagged);
+
+        // The message was cleared (stub + CCR id) and then dropped this pass.
+        let mut dropped_stub = Message::new(
+            "tool",
+            "[tool:shell] result cleared (6 tokens) — original retrievable via <<ccr:b3:deadbeef>>",
+        );
+        dropped_stub
+            .metadata
+            .insert(ORIGINAL_INDEX_KEY.to_string(), "0".to_string());
+        dropped_stub
+            .metadata
+            .insert(meta_keys::CCR_ID.to_string(), "b3:deadbeef".to_string());
+        let dropped = vec![dropped_stub];
+
+        let mut compacted: Vec<Message> = Vec::new();
+        let counter = crate::token_counter::HeuristicCounter::new();
+        let folds = build_fold_records(&original, &mut compacted, &saved, &dropped, &counter);
+
+        assert_eq!(folds.len(), 1);
+        assert_eq!(folds[0].kind, FoldKind::Dropped);
+        assert_eq!(
+            folds[0].ccr_id.as_deref(),
+            Some("b3:deadbeef"),
+            "a cleared-then-dropped message must keep its CCR pointer in the audit record"
+        );
     }
 }

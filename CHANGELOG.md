@@ -77,9 +77,15 @@ versions may contain breaking changes).
 
 ### Changed
 
-- Conversation compression now honors the `PINNED` contract: a message marked
-  `meta_keys::PINNED` is never rewritten by `compress_conversation_history`'s
-  middle-band compression (previously only clearing and dropping respected it).
+- Conversation compression now fully honors the `PINNED` contract: a message
+  marked `meta_keys::PINNED` is never rewritten — not by middle-band compression
+  and not by the old-band summary/drop (previously only clearing and budget-drop
+  respected it, so a pinned message could be compressed or summarized, and in a
+  session a finalized summary stub could be recursively re-summarized).
+- A tool result that is cleared and then dropped within the same budget pass now
+  keeps its CCR id in the `Dropped` `FoldRecord` (the cascade threads the dropped
+  stub through to fold-record building; `BudgetReport` gains a `dropped` field),
+  so the audit pointer to the stored original is no longer orphaned.
 - `compact_rich` now runs the agent/budget cascade on the verbatim conversation
   FIRST and block-compresses only the kept, non-protected messages afterward.
   This fixes two correctness bugs found by audit: (1) the cascade no longer

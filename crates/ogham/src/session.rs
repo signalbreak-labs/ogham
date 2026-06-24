@@ -22,7 +22,6 @@ use crate::compact::{
 };
 use crate::token_counter::counter_for_model;
 use ogham_core::{Message, Result, meta_keys};
-use std::collections::BTreeSet;
 
 /// Metadata flag marking a message the session has finalized (folded). Finalized
 /// messages are pinned and never reprocessed by a later [`ContextSession::compact`].
@@ -63,7 +62,6 @@ pub struct ContextSession {
     config: SessionConfig,
     messages: Vec<Message>,
     folds: Vec<FoldRecord>,
-    fold_ids: BTreeSet<String>,
 }
 
 impl ContextSession {
@@ -73,7 +71,6 @@ impl ContextSession {
             config,
             messages: Vec::new(),
             folds: Vec::new(),
-            fold_ids: BTreeSet::new(),
         }
     }
 
@@ -126,20 +123,19 @@ impl ContextSession {
         let result = compact_conversation(working, self.compact_config()).await?;
         self.messages = result.messages;
 
-        // Mark this turn's fold replacements finalized and collect the delta.
-        let mut new_folds = Vec::new();
-        for fold in result.folds {
+        // Mark this turn's fold replacements finalized. Finalized messages are
+        // pinned and never reprocessed, so `result.folds` is exactly this turn's
+        // new delta — append all of them (the ledger is append-only).
+        let new_folds = result.folds;
+        for fold in &new_folds {
             if let Some(idx) = fold.replacement_index
                 && let Some(msg) = self.messages.get_mut(idx)
             {
                 msg.metadata
                     .insert(SESSION_FINALIZED.to_string(), "true".to_string());
             }
-            if self.fold_ids.insert(fold.id.clone()) {
-                self.folds.push(fold.clone());
-                new_folds.push(fold);
-            }
         }
+        self.folds.extend(new_folds.iter().cloned());
 
         let counter = counter_for_model(self.config.model.as_deref().unwrap_or("default"));
         let tokens = counter.count_messages(&self.messages);
@@ -324,5 +320,43 @@ mod tests {
                 "a finalized stub's original must remain retrievable"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn identical_content_cleared_twice_records_two_folds() {
+        let store: Arc<dyn CcrStore> = Arc::new(InMemoryCcrStore::new());
+        // Budget tight enough to clear each bulky tool result, loose enough that
+        // the resulting stubs fit under any counter (heuristic or tiktoken).
+        let mut s = session_with_budget(store, 220);
+        let same = "IDENTICAL_TOOL_OUTPUT_LINE\n".repeat(60);
+
+        s.push(Message::new("system", "sys"));
+        s.push(tool_msg("shell", same.clone()));
+        s.push(Message::new("user", "a"));
+        s.compact().await.unwrap();
+        let after_first = s
+            .folds()
+            .iter()
+            .filter(|f| f.kind == FoldKind::Cleared)
+            .count();
+        assert_eq!(after_first, 1);
+
+        // The same command runs again, producing byte-identical output.
+        s.push(tool_msg("shell", same.clone()));
+        s.push(Message::new("user", "b"));
+        let step = s.compact().await.unwrap();
+        let after_second = s
+            .folds()
+            .iter()
+            .filter(|f| f.kind == FoldKind::Cleared)
+            .count();
+        assert_eq!(
+            after_second, 2,
+            "a second clear of identical content is its own ledger event"
+        );
+        assert!(
+            step.new_folds.iter().any(|f| f.kind == FoldKind::Cleared),
+            "the second clear must appear in this step's delta"
+        );
     }
 }
