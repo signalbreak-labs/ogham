@@ -9,6 +9,13 @@ versions may contain breaking changes).
 
 ### Added
 
+- `ContextSession` (`ogham::session`): stateful, incremental conversation
+  compaction. `push()` appends turns; `compact()` folds only the active tail and
+  freezes already-folded messages (marked finalized + pinned), so each turn does
+  work proportional to new content instead of recompacting the whole history.
+  The fold ledger is append-only (stable undo/UI references) and the finalized
+  region is byte-stable (preserves provider prompt-cache reuse). Adds
+  `SessionConfig` and `SessionStep`.
 - Honest token-count provenance: `TokenCountKind`
   (`Exact` / `Estimated { method, safety_margin }` / `ProviderReported`) and a
   `TokenCounter::count_kind()` default method, so a counter declares how its
@@ -70,6 +77,9 @@ versions may contain breaking changes).
 
 ### Changed
 
+- Conversation compression now honors the `PINNED` contract: a message marked
+  `meta_keys::PINNED` is never rewritten by `compress_conversation_history`'s
+  middle-band compression (previously only clearing and dropping respected it).
 - `compact_rich` now runs the agent/budget cascade on the verbatim conversation
   FIRST and block-compresses only the kept, non-protected messages afterward.
   This fixes two correctness bugs found by audit: (1) the cascade no longer

@@ -75,6 +75,7 @@ pub mod memory;
 pub mod pipeline;
 pub mod providers;
 pub mod rich;
+pub mod session;
 pub mod stats_math;
 pub mod token_counter;
 pub mod token_est;
@@ -182,6 +183,7 @@ pub use rich::{
     CompactRichConfig, CompactRichResult, RichCompressionPolicy, compact_rich,
     compress_rich_messages, restore_rich_message,
 };
+pub use session::{ContextSession, SessionConfig, SessionStep};
 
 /// Detect the content type of a string.
 pub fn detect(content: &str) -> crate::detect::DetectionResult {

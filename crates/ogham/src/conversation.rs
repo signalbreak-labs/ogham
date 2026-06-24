@@ -10,7 +10,7 @@
 //! retaining semantic continuity.
 
 use crate::pipeline::DefaultCompressionPipeline;
-use ogham_core::{CompressionContext, CompressionPipeline, Message, Result};
+use ogham_core::{CompressionContext, CompressionPipeline, Message, Result, meta_keys};
 
 /// How aggressively to compress different age bands.
 #[derive(Debug, Clone, Copy)]
@@ -96,7 +96,14 @@ pub async fn compress_conversation_history(
         stats.original_middle_tokens = compressed.stats.original_tokens;
         stats.compressed_middle_tokens = compressed.stats.compressed_tokens;
 
-        for msg in compressed.messages.into_iter().rev() {
+        // Honor the PINNED contract: a pinned message is never rewritten.
+        let mut out_msgs = compressed.messages;
+        for (i, original) in middle.iter().enumerate() {
+            if original.metadata.get(meta_keys::PINNED).map(String::as_str) == Some("true") {
+                out_msgs[i] = original.clone();
+            }
+        }
+        for msg in out_msgs.into_iter().rev() {
             messages.insert(0, msg);
         }
     }
@@ -180,7 +187,14 @@ pub async fn compress_conversation_history_with_summarizer(
         stats.original_middle_tokens = compressed.stats.original_tokens;
         stats.compressed_middle_tokens = compressed.stats.compressed_tokens;
 
-        for msg in compressed.messages.into_iter().rev() {
+        // Honor the PINNED contract: a pinned message is never rewritten.
+        let mut out_msgs = compressed.messages;
+        for (i, original) in middle.iter().enumerate() {
+            if original.metadata.get(meta_keys::PINNED).map(String::as_str) == Some("true") {
+                out_msgs[i] = original.clone();
+            }
+        }
+        for msg in out_msgs.into_iter().rev() {
             messages.insert(0, msg);
         }
     }
@@ -423,6 +437,54 @@ mod tests {
                 || msgs[0]
                     .content
                     .starts_with("[Earlier conversation summary]")
+        );
+    }
+
+    #[tokio::test]
+    async fn pinned_middle_message_is_not_compressed() {
+        // A pinned, highly-compressible message sitting in the middle band must
+        // pass through byte-for-byte (the documented PINNED contract).
+        let big: Vec<_> = (0..60)
+            .map(|i| serde_json::json!({ "id": i, "name": format!("item_{i}"), "score": i }))
+            .collect();
+        let big_json = serde_json::to_string(&big).unwrap();
+        let mut pinned = Message::new("tool", big_json.clone());
+        pinned
+            .metadata
+            .insert(meta_keys::PINNED.to_string(), "true".to_string());
+
+        let mut msgs = vec![
+            Message::new("system", "sys"),
+            pinned,
+            Message::new("user", "u1"),
+            Message::new("assistant", "a1"),
+            Message::new("user", "recent"),
+        ];
+        let pipeline = DefaultCompressionPipeline::with_builtin_compressors(
+            None,
+            crate::pipeline::DEFAULT_COMPRESSORS,
+        )
+        .unwrap();
+        let ctx = CompressionContext {
+            model: "default".into(),
+            question_hint: None,
+            max_tokens: None,
+            reversible: false,
+        };
+        let config = ConversationConfig {
+            preserve_recent: 2,
+            compress_middle: 10,
+            summary_old: false,
+            bias_system: 0.8,
+        };
+        compress_conversation_history(&mut msgs, &config, &pipeline, &ctx)
+            .await
+            .unwrap();
+
+        assert!(
+            msgs.iter().any(|m| m.content == big_json
+                && m.metadata.get(meta_keys::PINNED).map(String::as_str) == Some("true")),
+            "a pinned message must never be compressed"
         );
     }
 }

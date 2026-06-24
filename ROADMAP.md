@@ -57,6 +57,10 @@ The safety and honesty foundation is in place:
   `FoldRecord`s (cleared / compressed / summarized / dropped), a protected-tail
   report, optional budget/agent reports, and provider cache annotations — so
   hosts never have to scrape marker strings to infer what happened.
+- **Stateful incremental compaction.** `ContextSession` compacts append-only:
+  push turns, compact only the active tail, freeze already-folded messages. Each
+  turn's work is proportional to new content, the fold ledger is append-only, and
+  the finalized region stays byte-stable for prompt-cache reuse.
 - **Honest token counting.** Heuristic estimates carry an explicit safety margin;
   exact OpenAI counts are available behind the `tiktoken` feature. Estimated
   counts are never presented as exact.
