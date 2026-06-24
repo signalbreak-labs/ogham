@@ -9,6 +9,16 @@ versions may contain breaking changes).
 
 ### Added
 
+- Structured fold tags (`ogham::fold_tags`): every `FoldRecord` now carries a
+  deterministic `FoldTags { tool_names, error_classes, file_paths }`, extracted
+  offline during compaction from the fold's original messages (tool names from
+  `metadata[TOOL_NAME]`, error classes from the same patterns the agent cascade
+  uses — a parity test guards drift — and a conservative file-path scan). This
+  adds the typed-field axis to recall: `RecallHit` carries the tags and
+  `RecallIndex::find_by_tag(FoldTagKind, value)` returns folds by tool/error/path
+  (case-insensitive) without a free-text query, so a host can ask "all folds from
+  the `shell` tool" or "all folds with a `panic`". `ContextSession` indexes tags
+  automatically. Re-exports `FoldTags`, `FoldTagKind`, `extract_fold_tags`.
 - Searchable fold recall (`ogham::recall`): a deterministic BM25 keyword index
   over folded content, addressable by CCR id. Reversible CCR is exact-id-only —
   you can retrieve an original only if you still hold its `<<ccr:HASH>>` marker —

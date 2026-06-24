@@ -10,6 +10,7 @@
 //! so its fold ledger becomes searchable memory.
 
 use crate::compact::FoldKind;
+use crate::fold_tags::{FoldTagKind, FoldTags};
 use std::collections::HashMap;
 
 const PREVIEW_CHARS: usize = 160;
@@ -24,20 +25,35 @@ pub struct RecallHit {
     pub ccr_id: String,
     /// What kind of fold produced this content.
     pub kind: FoldKind,
+    /// Structured tags (tool names, error classes, file paths) for the fold.
+    pub tags: FoldTags,
     /// A short preview of the original content.
     pub preview: String,
-    /// BM25 relevance score (higher is more relevant).
+    /// BM25 relevance score (higher is more relevant). `0.0` for tag-only hits.
     pub score: f64,
 }
 
 struct Doc {
     ccr_id: String,
     kind: FoldKind,
+    tags: FoldTags,
     preview: String,
     /// term -> frequency in this document.
     terms: HashMap<String, usize>,
     /// total number of (non-unique) terms.
     len: usize,
+}
+
+impl Doc {
+    fn to_hit(&self, score: f64) -> RecallHit {
+        RecallHit {
+            ccr_id: self.ccr_id.clone(),
+            kind: self.kind,
+            tags: self.tags.clone(),
+            preview: self.preview.clone(),
+            score,
+        }
+    }
 }
 
 /// A deterministic BM25 index over folded content, addressable by CCR id.
@@ -63,8 +79,9 @@ impl RecallIndex {
     }
 
     /// Index a piece of folded content's original `text`, addressable by
-    /// `ccr_id`. Re-indexing the same id replaces the prior entry.
-    pub fn index(&mut self, ccr_id: impl Into<String>, kind: FoldKind, text: &str) {
+    /// `ccr_id`, with its structured `tags`. Re-indexing the same id replaces
+    /// the prior entry.
+    pub fn index(&mut self, ccr_id: impl Into<String>, kind: FoldKind, tags: FoldTags, text: &str) {
         let ccr_id = ccr_id.into();
         self.remove(&ccr_id);
 
@@ -77,6 +94,7 @@ impl RecallIndex {
         self.docs.push(Doc {
             ccr_id,
             kind,
+            tags,
             preview: preview(text),
             terms,
             len,
@@ -139,12 +157,7 @@ impl RecallIndex {
                         idf * (tf * (K1 + 1.0)) / denom
                     })
                     .sum();
-                (score > 0.0).then(|| RecallHit {
-                    ccr_id: doc.ccr_id.clone(),
-                    kind: doc.kind,
-                    preview: doc.preview.clone(),
-                    score,
-                })
+                (score > 0.0).then(|| doc.to_hit(score))
             })
             .collect();
 
@@ -155,6 +168,21 @@ impl RecallIndex {
                 .then_with(|| a.ccr_id.cmp(&b.ccr_id))
         });
         hits.truncate(limit);
+        hits
+    }
+
+    /// Find folds whose structured tags contain `value` (case-insensitive)
+    /// under `kind` — e.g. all folds from a given tool, or all folds with a
+    /// `panic` error class. Results are score-`0.0` tag hits, ordered by
+    /// `ccr_id` for determinism.
+    pub fn find_by_tag(&self, kind: FoldTagKind, value: &str) -> Vec<RecallHit> {
+        let mut hits: Vec<RecallHit> = self
+            .docs
+            .iter()
+            .filter(|doc| doc.tags.contains(kind, value))
+            .map(|doc| doc.to_hit(0.0))
+            .collect();
+        hits.sort_by(|a, b| a.ccr_id.cmp(&b.ccr_id));
         hits
     }
 }
@@ -252,6 +280,11 @@ fn preview(text: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Index untagged content (most tests don't exercise tags).
+    fn index(idx: &mut RecallIndex, ccr_id: &str, kind: FoldKind, text: &str) {
+        idx.index(ccr_id, kind, FoldTags::default(), text);
+    }
+
     #[test]
     fn extract_terms_splits_paths_and_identifiers() {
         let terms = extract_terms("opened src/auth/login.rs in parseToolResult");
@@ -275,17 +308,20 @@ mod tests {
     #[test]
     fn search_ranks_relevant_fold_first() {
         let mut idx = RecallIndex::new();
-        idx.index(
+        index(
+            &mut idx,
             "b3:auth",
             FoldKind::Cleared,
             "Error: authentication failed for user login in src/auth/login.rs",
         );
-        idx.index(
+        index(
+            &mut idx,
             "b3:db",
             FoldKind::Cleared,
             "connected to the postgres database and ran a migration",
         );
-        idx.index(
+        index(
+            &mut idx,
             "b3:ui",
             FoldKind::Dropped,
             "rendered the settings panel and the sidebar",
@@ -301,14 +337,19 @@ mod tests {
     #[test]
     fn search_returns_nothing_for_unmatched_query() {
         let mut idx = RecallIndex::new();
-        idx.index("b3:x", FoldKind::Cleared, "the cat sat on the mat");
+        index(
+            &mut idx,
+            "b3:x",
+            FoldKind::Cleared,
+            "the cat sat on the mat",
+        );
         assert!(idx.search("kubernetes deployment", 5).is_empty());
     }
 
     #[test]
     fn remove_drops_a_document() {
         let mut idx = RecallIndex::new();
-        idx.index("b3:x", FoldKind::Cleared, "auth login token");
+        index(&mut idx, "b3:x", FoldKind::Cleared, "auth login token");
         assert_eq!(idx.len(), 1);
         assert!(idx.remove("b3:x"));
         assert!(idx.search("auth", 5).is_empty());
@@ -318,8 +359,18 @@ mod tests {
     #[test]
     fn reindexing_same_id_replaces() {
         let mut idx = RecallIndex::new();
-        idx.index("b3:x", FoldKind::Cleared, "old content about apples");
-        idx.index("b3:x", FoldKind::Cleared, "new content about oranges");
+        index(
+            &mut idx,
+            "b3:x",
+            FoldKind::Cleared,
+            "old content about apples",
+        );
+        index(
+            &mut idx,
+            "b3:x",
+            FoldKind::Cleared,
+            "new content about oranges",
+        );
         assert_eq!(idx.len(), 1);
         assert!(idx.search("apples", 5).is_empty());
         assert_eq!(idx.search("oranges", 5).len(), 1);
@@ -328,12 +379,14 @@ mod tests {
     #[test]
     fn search_is_deterministic() {
         let mut idx = RecallIndex::new();
-        idx.index(
+        index(
+            &mut idx,
             "b3:a",
             FoldKind::Cleared,
             "shared term shared term unique_a",
         );
-        idx.index(
+        index(
+            &mut idx,
             "b3:b",
             FoldKind::Cleared,
             "shared term shared term unique_b",
@@ -341,5 +394,49 @@ mod tests {
         let a = idx.search("shared", 5);
         let b = idx.search("shared", 5);
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn find_by_tag_filters_by_typed_field() {
+        let mut idx = RecallIndex::new();
+        idx.index(
+            "b3:shell",
+            FoldKind::Cleared,
+            FoldTags {
+                tool_names: vec!["shell".to_string()],
+                file_paths: vec!["src/main.rs".to_string()],
+                ..FoldTags::default()
+            },
+            "ran a shell command in src/main.rs",
+        );
+        idx.index(
+            "b3:edit",
+            FoldKind::Cleared,
+            FoldTags {
+                tool_names: vec!["editor".to_string()],
+                error_classes: vec!["panic".to_string()],
+                ..FoldTags::default()
+            },
+            "edited a file and hit a panic",
+        );
+
+        // Filter by tool name (case-insensitive), returns the right fold.
+        let shell = idx.find_by_tag(FoldTagKind::ToolName, "SHELL");
+        assert_eq!(shell.len(), 1);
+        assert_eq!(shell[0].ccr_id, "b3:shell");
+        assert_eq!(shell[0].tags.file_paths, vec!["src/main.rs".to_string()]);
+
+        // Filter by error class.
+        let panics = idx.find_by_tag(FoldTagKind::ErrorClass, "panic");
+        assert_eq!(panics.len(), 1);
+        assert_eq!(panics[0].ccr_id, "b3:edit");
+
+        // No match returns empty.
+        assert!(idx.find_by_tag(FoldTagKind::ToolName, "browser").is_empty());
+
+        // Tags also ride along on free-text hits.
+        let hits = idx.search("panic", 5);
+        assert_eq!(hits[0].ccr_id, "b3:edit");
+        assert_eq!(hits[0].tags.error_classes, vec!["panic".to_string()]);
     }
 }

@@ -1,0 +1,279 @@
+//! Structured, retrieval-friendly tags extracted from folded content.
+//!
+//! [`crate::recall::RecallIndex`] makes folded content searchable by free-text
+//! relevance. Tags add the complementary *typed-field* axis: a host can ask
+//! "which folds came from the `shell` tool?" or "which folds contain a panic?"
+//! without a text query. Tags are extracted deterministically and offline
+//! during compaction (zero runtime cost to hosts) from the fold's original
+//! messages, and every field is sorted and deduplicated so the same input
+//! always yields byte-identical tags.
+
+use ogham_core::{Message, meta_keys};
+
+/// Maps each [`agent::ERROR_PATTERNS`](crate::agent::ERROR_PATTERNS) substring
+/// to a normalized error-class name. Kept in lockstep with `agent::ERROR_PATTERNS`
+/// (a unit test asserts parity) so tag extraction agrees with how the cascade
+/// itself classifies errors.
+const ERROR_CLASS_MAP: &[(&str, &str)] = &[
+    ("Error:", "error"),
+    ("error:", "error"),
+    ("ERROR", "error"),
+    ("Traceback (most recent call last)", "traceback"),
+    ("panicked at", "panic"),
+    ("Exception", "exception"),
+    ("FAILED", "failed"),
+    ("stderr:", "stderr"),
+];
+
+/// Error class recorded when a tool message is flagged `TOOL_STATUS == "error"`
+/// but its content matches none of the textual patterns.
+const TOOL_ERROR_CLASS: &str = "tool_error";
+
+/// File extensions treated as path-like even without a `/` separator, so a bare
+/// `Cargo.toml` or `login.rs` is recognized while `e.g` or `1.2.3` is not.
+const KNOWN_EXTENSIONS: &[&str] = &[
+    "rs", "go", "ts", "tsx", "js", "jsx", "py", "rb", "java", "kt", "c", "h", "cc", "cpp", "hpp",
+    "cs", "swift", "sh", "bash", "zsh", "sql", "html", "css", "scss", "toml", "yaml", "yml",
+    "json", "md", "txt", "proto", "lock", "cfg", "ini", "env", "tf", "hcl",
+];
+
+/// A selectable category of structured fold tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FoldTagKind {
+    /// Tool/command names (`metadata[TOOL_NAME]`).
+    ToolName,
+    /// Normalized error classes (e.g. `panic`, `traceback`, `error`).
+    ErrorClass,
+    /// File paths and path-like filenames mentioned in the content.
+    FilePath,
+}
+
+/// Typed metadata extracted from a fold's original messages. Every field is
+/// sorted and deduplicated for determinism.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FoldTags {
+    /// Names of tools/commands whose output the fold contains.
+    pub tool_names: Vec<String>,
+    /// Normalized error classes detected in the fold's content.
+    pub error_classes: Vec<String>,
+    /// File paths and path-like filenames referenced in the fold's content.
+    pub file_paths: Vec<String>,
+}
+
+impl FoldTags {
+    /// Whether no tags were extracted.
+    pub fn is_empty(&self) -> bool {
+        self.tool_names.is_empty() && self.error_classes.is_empty() && self.file_paths.is_empty()
+    }
+
+    /// The values for one tag category.
+    pub fn values(&self, kind: FoldTagKind) -> &[String] {
+        match kind {
+            FoldTagKind::ToolName => &self.tool_names,
+            FoldTagKind::ErrorClass => &self.error_classes,
+            FoldTagKind::FilePath => &self.file_paths,
+        }
+    }
+
+    /// Whether this tag set contains `value` (case-insensitive) under `kind`.
+    pub fn contains(&self, kind: FoldTagKind, value: &str) -> bool {
+        self.values(kind)
+            .iter()
+            .any(|v| v.eq_ignore_ascii_case(value))
+    }
+}
+
+/// Extract structured tags from a fold's original messages.
+///
+/// Deterministic: tool names come from `metadata[TOOL_NAME]`; error classes
+/// from the same patterns the agent cascade uses to classify errors (over the
+/// first 512 bytes of each message); file paths from a conservative path scan.
+pub fn extract_fold_tags(originals: &[Message]) -> FoldTags {
+    let mut tool_names = Vec::new();
+    let mut error_classes = Vec::new();
+    let mut file_paths = Vec::new();
+
+    for msg in originals {
+        if let Some(tool) = msg.metadata.get(meta_keys::TOOL_NAME)
+            && !tool.is_empty()
+        {
+            tool_names.push(tool.clone());
+        }
+        collect_error_classes(msg, &mut error_classes);
+        collect_file_paths(&msg.content, &mut file_paths);
+    }
+
+    FoldTags {
+        tool_names: sorted_unique(tool_names),
+        error_classes: sorted_unique(error_classes),
+        file_paths: sorted_unique(file_paths),
+    }
+}
+
+fn collect_error_classes(msg: &Message, out: &mut Vec<String>) {
+    if msg.metadata.get(meta_keys::TOOL_STATUS).map(String::as_str) == Some("error") {
+        out.push(TOOL_ERROR_CLASS.to_string());
+    }
+    let window = prefix_to_char_boundary(&msg.content, 512);
+    for (pattern, class) in ERROR_CLASS_MAP {
+        if window.contains(pattern) {
+            out.push((*class).to_string());
+        }
+    }
+}
+
+fn collect_file_paths(content: &str, out: &mut Vec<String>) {
+    for raw in content.split(|c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '"' | '\''
+                    | '`'
+                    | '('
+                    | ')'
+                    | ','
+                    | ';'
+                    | ':'
+                    | '['
+                    | ']'
+                    | '{'
+                    | '}'
+                    | '='
+                    | '<'
+                    | '>'
+                    | '|'
+                    | '*'
+            )
+    }) {
+        let token = raw
+            .trim_matches(|c: char| !(c.is_alphanumeric() || matches!(c, '/' | '.' | '_' | '-')));
+        if let Some(path) = looks_like_path(token) {
+            out.push(path);
+        }
+    }
+}
+
+/// Recognize a path-like token: `stem.ext` where `ext` is short and alphabetic,
+/// and either the token contains a `/` separator or `ext` is a known code
+/// extension. Conservative on purpose — rejects `e.g`, `1.2.3`, `U.S.A`.
+fn looks_like_path(token: &str) -> Option<String> {
+    let (stem, ext) = token.rsplit_once('.')?;
+    if stem.is_empty() || ext.is_empty() || ext.len() > 12 {
+        return None;
+    }
+    if !ext.chars().all(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    if !stem.chars().any(|c| c.is_alphanumeric()) {
+        return None;
+    }
+    let ext_lower = ext.to_ascii_lowercase();
+    if token.contains('/') || KNOWN_EXTENSIONS.contains(&ext_lower.as_str()) {
+        Some(token.to_string())
+    } else {
+        None
+    }
+}
+
+fn sorted_unique(mut values: Vec<String>) -> Vec<String> {
+    values.sort();
+    values.dedup();
+    values
+}
+
+/// Truncate to at most `max` bytes without splitting a UTF-8 char.
+fn prefix_to_char_boundary(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::ERROR_PATTERNS;
+
+    fn tool_msg(name: &str, content: &str) -> Message {
+        let mut m = Message::new("tool", content);
+        m.metadata
+            .insert(meta_keys::TOOL_NAME.to_string(), name.to_string());
+        m
+    }
+
+    #[test]
+    fn error_class_map_matches_agent_patterns() {
+        // Parity guard: every classifier pattern must have a tag mapping, so the
+        // two never drift apart.
+        let mapped: std::collections::BTreeSet<&str> =
+            ERROR_CLASS_MAP.iter().map(|(p, _)| *p).collect();
+        let patterns: std::collections::BTreeSet<&str> = ERROR_PATTERNS.iter().copied().collect();
+        assert_eq!(mapped, patterns);
+    }
+
+    #[test]
+    fn extracts_tool_names_deduped_and_sorted() {
+        let tags = extract_fold_tags(&[
+            tool_msg("shell", "ran ls"),
+            tool_msg("editor", "opened a file"),
+            tool_msg("shell", "ran cat"),
+        ]);
+        assert_eq!(tags.tool_names, vec!["editor", "shell"]);
+    }
+
+    #[test]
+    fn extracts_error_classes_from_patterns() {
+        let tags = extract_fold_tags(&[Message::new(
+            "tool",
+            "Traceback (most recent call last)\n  File x\npanicked at line 3",
+        )]);
+        assert!(tags.error_classes.contains(&"traceback".to_string()));
+        assert!(tags.error_classes.contains(&"panic".to_string()));
+        // Sorted + deduped.
+        assert_eq!(
+            tags.error_classes,
+            sorted_unique(tags.error_classes.clone())
+        );
+    }
+
+    #[test]
+    fn tool_status_error_tags_tool_error() {
+        let mut m = Message::new("tool", "no textual pattern here, just data");
+        m.metadata
+            .insert(meta_keys::TOOL_STATUS.to_string(), "error".to_string());
+        let tags = extract_fold_tags(&[m]);
+        assert_eq!(tags.error_classes, vec!["tool_error"]);
+    }
+
+    #[test]
+    fn extracts_file_paths_and_rejects_non_paths() {
+        let tags = extract_fold_tags(&[Message::new(
+            "tool",
+            "edited src/auth/login.rs and Cargo.toml; version 1.2.3, e.g. the U.S.A",
+        )]);
+        assert!(tags.file_paths.contains(&"src/auth/login.rs".to_string()));
+        assert!(tags.file_paths.contains(&"Cargo.toml".to_string()));
+        // Non-paths must not leak in.
+        assert!(!tags.file_paths.iter().any(|p| p.contains("1.2.3")));
+        assert!(!tags.file_paths.iter().any(|p| p == "e.g"));
+        assert!(!tags.file_paths.iter().any(|p| p.contains("U.S.A")));
+    }
+
+    #[test]
+    fn values_and_contains_are_case_insensitive() {
+        let tags = extract_fold_tags(&[tool_msg("Shell", "x")]);
+        assert_eq!(tags.values(FoldTagKind::ToolName), &["Shell".to_string()]);
+        assert!(tags.contains(FoldTagKind::ToolName, "shell"));
+        assert!(!tags.contains(FoldTagKind::ToolName, "editor"));
+    }
+
+    #[test]
+    fn empty_when_nothing_to_tag() {
+        let tags = extract_fold_tags(&[Message::new("assistant", "just a normal reply")]);
+        assert!(tags.is_empty());
+    }
+}

@@ -469,6 +469,7 @@ fn block_compression_fold(
         replacement_tokens: rich_message_tokens(compressed, counter),
         ccr_id,
         marker: None,
+        tags: crate::fold_tags::extract_fold_tags(&[original.to_flat_lossy()]),
     }
 }
 

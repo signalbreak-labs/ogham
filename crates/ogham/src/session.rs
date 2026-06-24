@@ -197,7 +197,8 @@ impl ContextSession {
                 None => continue,
             };
             if !text.is_empty() {
-                self.recall.index(ccr_id, fold.kind, &text);
+                self.recall
+                    .index(ccr_id, fold.kind, fold.tags.clone(), &text);
             }
         }
 
@@ -791,6 +792,53 @@ mod tests {
         assert!(
             original.contains("authentication succeeded for user alice"),
             "recall resolves to the verbatim original"
+        );
+    }
+
+    #[tokio::test]
+    async fn recall_finds_folded_content_by_tag() {
+        use crate::fold_tags::FoldTagKind;
+
+        let store: Arc<dyn CcrStore> = Arc::new(InMemoryCcrStore::unbounded());
+        let mut s = ContextSession::new(SessionConfig {
+            agent_policy: AgentPolicy {
+                keep_recent_tool_results: 0,
+                clear_old_tool_results: true,
+                keep_recent_assistant: 2,
+                protected_tail_tokens: None,
+            },
+            ccr: CcrPolicy::Store(store),
+            ..Default::default()
+        });
+        s.push(Message::new("system", "sys"));
+        s.push(Message::new("assistant", "checking auth"));
+        s.push(tool_msg(
+            "shell",
+            "authentication succeeded for user alice in src/auth/login.rs handler ".repeat(8),
+        ));
+        s.push(Message::new("user", "ok"));
+        s.compact().await.unwrap();
+
+        // The fold carries its structured tags; the file path is unique to it.
+        let by_path = s
+            .recall()
+            .find_by_tag(FoldTagKind::FilePath, "src/auth/login.rs");
+        assert_eq!(by_path.len(), 1, "exactly one fold mentions that path");
+        assert!(by_path[0].tags.tool_names.contains(&"shell".to_string()));
+
+        let original = s
+            .retrieve(&by_path[0].ccr_id)
+            .await
+            .unwrap()
+            .expect("the tag-recalled original must be retrievable");
+        assert!(original.contains("authentication succeeded for user alice"));
+
+        // Tool-name filtering also finds it.
+        assert!(
+            s.recall()
+                .find_by_tag(FoldTagKind::ToolName, "shell")
+                .iter()
+                .any(|h| h.ccr_id == by_path[0].ccr_id)
         );
     }
 

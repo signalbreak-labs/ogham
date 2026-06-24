@@ -103,6 +103,10 @@ pub struct FoldRecord {
     pub replacement_tokens: usize,
     pub ccr_id: Option<String>,
     pub marker: Option<String>,
+    /// Structured, retrieval-friendly tags extracted from the original
+    /// messages (tool names, error classes, file paths). Deterministic and
+    /// indexable by host retrieval/memory systems.
+    pub tags: crate::fold_tags::FoldTags,
 }
 
 /// Message-granular protected-tail evidence.
@@ -457,6 +461,7 @@ fn fold_for_span(
         replacement_tokens,
         ccr_id,
         marker,
+        tags: crate::fold_tags::extract_fold_tags(originals),
     }
 }
 

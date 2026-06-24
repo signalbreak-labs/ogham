@@ -71,6 +71,7 @@ pub mod compact;
 pub mod compressors;
 pub mod conversation;
 pub mod detect;
+pub mod fold_tags;
 pub mod memory;
 pub mod pipeline;
 pub mod providers;
@@ -180,6 +181,7 @@ pub use compact::{
     CachePlan, CachePolicy, CcrPolicy, CompactConfig, CompactResult, CompressionPolicy, FoldKind,
     FoldRecord, ProtectedReport, compact_conversation,
 };
+pub use fold_tags::{FoldTagKind, FoldTags, extract_fold_tags};
 pub use recall::{RecallHit, RecallIndex, extract_terms};
 pub use rich::{
     CompactRichConfig, CompactRichResult, RichCompressionPolicy, compact_rich,
