@@ -319,6 +319,12 @@ pub async fn compact_rich(
     )
     .await?;
     folds.extend(block_folds);
+    folds.sort_by_key(|fold| {
+        (
+            fold.original_range.start,
+            fold.replacement_index.unwrap_or(usize::MAX),
+        )
+    });
 
     // Fail-closed budget guard: the flat projection under-counts opaque blocks
     // (image bytes, tool inputs), so recount the ACTUAL emitted rich messages
@@ -1118,5 +1124,37 @@ mod tests {
             counter_for_model("default").count(&original_text),
             "cleared fold original_tokens must describe the verbatim original"
         );
+    }
+
+    #[tokio::test]
+    async fn compact_rich_sorts_cascade_and_block_folds_together() {
+        let store: Arc<dyn CcrStore> = Arc::new(InMemoryCcrStore::new());
+        let mut tool = RichMessage::text("tool", large_tool_output(11));
+        tool.metadata
+            .insert(meta_keys::TOOL_NAME.to_string(), "shell".to_string());
+
+        let result = compact_rich(
+            vec![agent_turn(), tool, RichMessage::text("user", "latest")],
+            CompactRichConfig {
+                agent_policy: AgentPolicy {
+                    keep_recent_tool_results: 0,
+                    clear_old_tool_results: true,
+                    ..Default::default()
+                },
+                ccr: CcrPolicy::Store(store),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let folded_indices: Vec<_> = result
+            .folds
+            .iter()
+            .map(|fold| fold.original_range.start)
+            .collect();
+        assert_eq!(folded_indices, vec![0, 1]);
+        assert_eq!(result.folds[0].kind, FoldKind::Compressed);
+        assert_eq!(result.folds[1].kind, FoldKind::Cleared);
     }
 }
