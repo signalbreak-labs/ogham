@@ -10,14 +10,33 @@
 /// large enough to dominate length-based ties so a matching item is retained.
 const FOCUS_TERM_BOOST: f64 = 100.0;
 
-/// Split a focus hint into lowercased search terms (alphanumeric runs of length
-/// >= 2). Returns empty for an empty or noise-only hint.
+/// High-frequency English function words dropped from focus hints. Without this,
+/// a natural hint like "what is the error" would keep `is`/`the`, which match
+/// almost any text and defeat compression by marking everything relevant. These
+/// are pure function words — domain terms (`error`, `fail`, `test`, …) are kept.
+const STOPWORDS: &[&str] = &[
+    "the", "an", "and", "or", "but", "nor", "so", "as", "if", "then", "than", "is", "are", "was",
+    "were", "be", "been", "being", "am", "to", "of", "in", "on", "at", "by", "for", "with", "from",
+    "into", "onto", "up", "out", "it", "its", "this", "that", "these", "those", "there", "here",
+    "do", "does", "did", "done", "can", "could", "would", "should", "shall", "will", "may",
+    "might", "must", "have", "has", "had", "what", "which", "who", "whom", "whose", "when",
+    "where", "why", "how", "my", "me", "we", "us", "our", "you", "your", "they", "them", "their",
+    "he", "she", "his", "her", "him", "too", "very", "just", "also", "not", "no",
+];
+
+/// Split a focus hint into lowercased, deduplicated search terms (alphanumeric
+/// runs of length >= 2, stopwords removed). Returns empty for an empty or
+/// noise-only hint, which keeps unfocused compression byte-identical.
 pub fn terms(query: &str) -> Vec<String> {
-    query
+    let mut terms: Vec<String> = query
         .split(|c: char| !c.is_alphanumeric())
         .filter(|t| t.chars().count() >= 2)
         .map(str::to_lowercase)
-        .collect()
+        .filter(|t| !STOPWORDS.contains(&t.as_str()))
+        .collect();
+    terms.sort();
+    terms.dedup();
+    terms
 }
 
 /// Whether `text` contains any focus term (case-insensitive). Always `false`
@@ -64,13 +83,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn terms_lowercases_and_drops_short_tokens() {
-        assert_eq!(terms("Fix the AuthBug in login"), {
-            // "the" and "in" are kept (>=2 chars); single chars dropped.
-            vec!["fix", "the", "authbug", "in", "login"]
-        });
+    fn terms_lowercases_drops_stopwords_and_dedups() {
+        // Stopwords ("the", "in") removed; result lowercased, sorted, deduped.
+        assert_eq!(
+            terms("Fix the AuthBug in login login"),
+            vec!["authbug", "fix", "login"]
+        );
         assert!(terms("").is_empty());
         assert!(terms("  , . ;").is_empty());
+        // A hint made only of stopwords yields no terms -> focus stays off.
+        assert!(terms("what is the").is_empty());
     }
 
     #[test]

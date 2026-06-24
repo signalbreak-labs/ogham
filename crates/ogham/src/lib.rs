@@ -183,7 +183,7 @@ pub use compact::{
     CachePlan, CachePolicy, CcrPolicy, CompactConfig, CompactResult, CompressionPolicy, FoldKind,
     FoldRecord, ProtectedReport, compact_conversation,
 };
-pub use fold_tags::{FoldTagKind, FoldTags, extract_fold_tags};
+pub use fold_tags::{FoldTagKind, FoldTags, extract_fold_tags, extract_fold_tags_rich};
 pub use recall::{RecallHit, RecallIndex, extract_terms};
 pub use rich::{
     CompactRichConfig, CompactRichResult, RichCompressionPolicy, compact_rich,

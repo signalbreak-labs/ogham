@@ -26,10 +26,12 @@ versions may contain breaking changes).
   `SmartCrusher` consumed `CompactConfig.focus`; now `LogStripper`,
   `AstCodeCompressor`, and `SemanticCompressor` do too, via the shared
   `compressors::focus` module. `LogStripper` retains log lines matching the
-  hint (scored below errors/fails, so focus never evicts a diagnostic),
-  `AstCodeCompressor` keeps matching code lines at full length instead of
-  truncating them, and `SemanticCompressor` keeps matching paragraphs full and
-  un-deduplicated. An empty/noise-only hint is byte-identical to the no-hint
+  hint (scored below every diagnostic tier, so focus never evicts an
+  error/warning/summary), `AstCodeCompressor` keeps matching code lines at full
+  length instead of truncating them, and `SemanticCompressor` keeps matching
+  paragraphs full and un-deduplicated. Hints are stopword-filtered and
+  deduplicated so a natural question ("what is the error") doesn't mark
+  everything relevant; an empty/noise-only hint is byte-identical to the no-hint
   path. (Also hardened: the code/semantic truncation now slices on a UTF-8 char
   boundary, fixing a latent multibyte panic.)
 - Structured fold tags (`ogham::fold_tags`): every `FoldRecord` now carries a
@@ -41,7 +43,11 @@ versions may contain breaking changes).
   `RecallIndex::find_by_tag(FoldTagKind, value)` returns folds by tool/error/path
   (case-insensitive) without a free-text query, so a host can ask "all folds from
   the `shell` tool" or "all folds with a `panic`". `ContextSession` indexes tags
-  automatically. Re-exports `FoldTags`, `FoldTagKind`, `extract_fold_tags`.
+  automatically. `extract_fold_tags_rich` adds rich-native signals (tool-call
+  names, errored tool results) the flat projection loses. Extraction is bounded
+  (per-message path scan, raw-candidate, and per-kind caps) so oversized content
+  can't amplify into the tag set. Re-exports `FoldTags`, `FoldTagKind`,
+  `extract_fold_tags`, `extract_fold_tags_rich`.
 - Searchable fold recall (`ogham::recall`): a deterministic BM25 keyword index
   over folded content, addressable by CCR id. Reversible CCR is exact-id-only —
   you can retrieve an original only if you still hold its `<<ccr:HASH>>` marker —

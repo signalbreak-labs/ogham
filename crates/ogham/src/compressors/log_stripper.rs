@@ -511,11 +511,13 @@ impl LogCompressor {
         }
         // Focus bucket: retain lines matching the caller's focus hint even if
         // they are plain info/debug. A match raises the line's effective score
-        // to at least FOCUS_LINE_SCORE so it survives the final truncation. We
-        // take the max with the intrinsic score and `replace` (not `insert`)
-        // any existing entry, so the boost applies regardless of bucket order
-        // and an already-selected error keeps its higher score (1.0) — focus
-        // never demotes, and never evicts, a diagnostic.
+        // to at least FOCUS_LINE_SCORE (below every diagnostic tier) so it
+        // survives the final truncation over generic info/context but never
+        // outranks an error/warning/stack/summary line. We take the max with
+        // the intrinsic score and `replace` (not `insert`) any existing entry,
+        // so the boost applies regardless of bucket order and a line that is
+        // itself a diagnostic keeps its higher score — focus never demotes, and
+        // never evicts, a diagnostic.
         if !focus.is_empty() {
             for line in log_lines {
                 if crate::compressors::focus::matches(&line.content, focus) {
@@ -654,9 +656,14 @@ fn count_level(lines: &[LogLine], level: LogLevel) -> u64 {
     lines.iter().filter(|l| l.level == level).count() as u64
 }
 
-/// Score given to a focus-matched line: above warnings/info/summaries but below
-/// errors/fails (1.0), so focus is retained without ever evicting a diagnostic.
-const FOCUS_LINE_SCORE: f32 = 0.95;
+/// Score floor for a focus-matched line. Deliberately below every diagnostic
+/// score — errors/fails (1.0), warnings (0.5), summaries (~0.5), and stack-trace
+/// lines (level + 0.3, i.e. >= 0.32) — but above plain info/debug/context
+/// (<= 0.1). So focus pulls relevant otherwise-discardable lines through the
+/// final truncation, yet can never evict a diagnostic (errors, warnings, stack
+/// context, or summaries) in its favor. A focus-matched line that is *itself* a
+/// diagnostic keeps its higher intrinsic score via `max`.
+const FOCUS_LINE_SCORE: f32 = 0.3;
 
 fn score_log_line(line: &LogLine) -> f32 {
     let level_score: f32 = match line.level {
@@ -821,6 +828,29 @@ mod tests {
         assert!(
             focused.compressed.contains("focusmarker"),
             "focus retains the matching line"
+        );
+    }
+
+    #[test]
+    fn focus_info_does_not_evict_warnings() {
+        let cmp = LogCompressor::new(LogCompressorConfig {
+            max_total_lines: 4,
+            min_lines_for_ccr: 5,
+            min_compression_ratio_for_ccr: 0.95,
+            ..Default::default()
+        });
+        let mut content = String::new();
+        content.push_str("WARNING disk almost full\n");
+        for i in 0..50 {
+            content.push_str(&format!("INFO focusmarker step {i}\n"));
+        }
+        // Many info lines match focus, but the lone warning must still survive:
+        // focus sits below the warning's diagnostic score.
+        let focus = crate::compressors::focus::terms("focusmarker");
+        let focused = cmp.compress_focused(&content, 1.0, &focus);
+        assert!(
+            focused.compressed.contains("WARNING disk almost full"),
+            "warnings outrank focus and are not evicted by focus-matched info"
         );
     }
 

@@ -8,7 +8,7 @@
 //! messages, and every field is sorted and deduplicated so the same input
 //! always yields byte-identical tags.
 
-use ogham_core::{Message, meta_keys};
+use ogham_core::{ContentBlock, Message, MessageContent, RichMessage, meta_keys};
 
 /// Maps each [`agent::ERROR_PATTERNS`](crate::agent::ERROR_PATTERNS) substring
 /// to a normalized error-class name. Kept in lockstep with `agent::ERROR_PATTERNS`
@@ -123,6 +123,51 @@ pub fn extract_fold_tags(originals: &[Message]) -> FoldTags {
     }
 }
 
+/// Extract structured tags from a [`RichMessage`], capturing rich-native signals
+/// the lossy flat projection drops: tool-call names from `ToolUse` blocks and
+/// the `is_error` flag on `ToolResult` blocks. Text-derived tags (error
+/// patterns, file paths, `metadata[TOOL_NAME]`) still come from the flattened
+/// text, so a block-compressed fold stays queryable by tool/error during
+/// failure recovery.
+pub fn extract_fold_tags_rich(message: &RichMessage) -> FoldTags {
+    let mut tags = extract_fold_tags(std::slice::from_ref(&message.to_flat_lossy()));
+
+    if let MessageContent::Blocks(blocks) = &message.content {
+        let mut tools = Vec::new();
+        let mut errors = Vec::new();
+        collect_block_tags(blocks, &mut tools, &mut errors);
+        if !tools.is_empty() {
+            tools.append(&mut tags.tool_names);
+            tags.tool_names = sorted_unique_capped(tools);
+        }
+        if !errors.is_empty() {
+            errors.append(&mut tags.error_classes);
+            tags.error_classes = sorted_unique_capped(errors);
+        }
+    }
+    tags
+}
+
+/// Walk rich content blocks collecting tool names (`ToolUse.name`) and the
+/// `tool_error` class for any errored `ToolResult`, recursing into nested
+/// tool-result content.
+fn collect_block_tags(blocks: &[ContentBlock], tools: &mut Vec<String>, errors: &mut Vec<String>) {
+    for block in blocks {
+        match block {
+            ContentBlock::ToolUse { name, .. } if !name.is_empty() => tools.push(name.clone()),
+            ContentBlock::ToolResult {
+                is_error, content, ..
+            } => {
+                if *is_error {
+                    errors.push(TOOL_ERROR_CLASS.to_string());
+                }
+                collect_block_tags(content, tools, errors);
+            }
+            _ => {}
+        }
+    }
+}
+
 fn collect_error_classes(msg: &Message, out: &mut Vec<String>) {
     if msg.metadata.get(meta_keys::TOOL_STATUS).map(String::as_str) == Some("error") {
         out.push(TOOL_ERROR_CLASS.to_string());
@@ -215,6 +260,46 @@ fn prefix_to_char_boundary(s: &str, max: usize) -> &str {
 mod tests {
     use super::*;
     use crate::agent::ERROR_PATTERNS;
+    use ogham_core::ImageSource;
+
+    #[test]
+    fn rich_extractor_captures_native_tool_and_error_tags() {
+        // A rich message whose text mentions nothing error-y, but whose blocks
+        // carry a tool call and an errored tool result. The flat projection
+        // would miss both; the rich extractor must not.
+        let message = RichMessage::blocks(
+            "assistant",
+            vec![
+                ContentBlock::Text {
+                    text: "running the build".into(),
+                },
+                ContentBlock::ToolUse {
+                    id: "c1".into(),
+                    name: "shell".into(),
+                    input: serde_json::json!({"cmd": "make"}),
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "c1".into(),
+                    is_error: true,
+                    content: vec![ContentBlock::Image {
+                        source: ImageSource::Url { url: "x".into() },
+                        alt: None,
+                    }],
+                },
+            ],
+        );
+        let tags = extract_fold_tags_rich(&message);
+        assert!(
+            tags.tool_names.contains(&"shell".to_string()),
+            "ToolUse.name captured: {:?}",
+            tags.tool_names
+        );
+        assert!(
+            tags.error_classes.contains(&"tool_error".to_string()),
+            "errored ToolResult captured: {:?}",
+            tags.error_classes
+        );
+    }
 
     fn tool_msg(name: &str, content: &str) -> Message {
         let mut m = Message::new("tool", content);
