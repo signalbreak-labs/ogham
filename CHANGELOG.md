@@ -70,6 +70,16 @@ versions may contain breaking changes).
 
 ### Changed
 
+- `compact_rich` now runs the agent/budget cascade on the verbatim conversation
+  FIRST and block-compresses only the kept, non-protected messages afterward.
+  This fixes two correctness bugs found by audit: (1) the cascade no longer
+  clears/recompresses already-compressed content, so a cleared/folded message's
+  CCR id and fold record resolve to the exact verbatim original (previously they
+  resolved to a lossy projection and `restore_rich_message` could orphan the
+  real payload); (2) `compact_rich` now recounts the true size of the emitted
+  rich output (counting opaque image/tool-input block bytes the flat projection
+  hides) and fails closed with `BudgetExceeded`, instead of returning an
+  over-budget payload while reporting that it fit.
 - `BudgetReport` now carries `count_kind` and the `safety_margin` actually
   applied, so a report never presents an estimate as exact. The budget cascade
   derives its margin from the counter's `count_kind` (behavior-preserving: exact

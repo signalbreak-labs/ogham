@@ -18,14 +18,16 @@ use crate::agent::{self, AgentCompressionStats, AgentPolicy};
 use crate::budget::{self, BudgetReport, ContextBudget};
 use crate::ccr::{CcrPayload, CcrStore, compute_key};
 use crate::compact::{
-    CachePlan, CachePolicy, CcrPolicy, FoldRecord, ORIGINAL_INDEX_KEY, ProtectedReport,
+    CachePlan, CachePolicy, CcrPolicy, FoldKind, FoldRecord, ORIGINAL_INDEX_KEY, ProtectedReport,
     apply_cache_policy, build_fold_records, protected_report, tag_original_indices,
 };
 use crate::pipeline::{DEFAULT_COMPRESSORS, DefaultCompressionPipeline};
 use crate::token_counter::counter_for_model;
 use ogham_core::{
-    CompressionPipeline, ContentBlock, Message, MessageContent, Result, RichMessage, meta_keys,
+    CompressionPipeline, ContentBlock, ImageSource, Message, MessageContent, OVERHEAD_PER_MESSAGE,
+    OghamError, Result, RichMessage, TokenCountKind, TokenCounter, meta_keys,
 };
+use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -147,11 +149,13 @@ pub async fn restore_rich_message(
 /// analogue of [`crate::compact::CompactConfig`].
 #[derive(Clone, Default)]
 pub struct CompactRichConfig {
-    /// Optional token budget to enforce (fail-closed) after block compression.
+    /// Optional token budget. The cascade enforces it on the flat projection and
+    /// the rich output is then recounted at its true size and fails closed.
     pub budget: Option<ContextBudget>,
     /// Agent rules for clearing/protecting messages.
     pub agent_policy: AgentPolicy,
-    /// Block-aware text-compression policy (Phase 1).
+    /// Block-aware text-compression policy, applied to kept, non-protected
+    /// messages after the cascade.
     pub rich: RichCompressionPolicy,
     /// CCR storage policy shared by block compression and cascade folds. Block
     /// compression uses it only when `rich.reversible` is enabled.
@@ -186,17 +190,27 @@ pub struct CompactRichResult {
     pub warnings: Vec<String>,
 }
 
-/// Compact a rich conversation: block-aware text compression, then the
-/// agent/budget cascade, returning structure-preserving messages plus fold
-/// records, protected-tail evidence, optional budget/agent reports, and a cache
-/// plan — the block-aware analogue of [`crate::compact::compact_conversation`].
+/// Compact a rich conversation — the block-aware analogue of
+/// [`crate::compact::compact_conversation`]. Returns structure-preserving
+/// messages plus fold records, protected-tail evidence, optional budget/agent
+/// reports, and a cache plan.
+///
+/// The agent/budget cascade runs FIRST, on the verbatim flat projection, so it
+/// clears/drops/summarizes the original content and stores verbatim CCR
+/// originals with correct fold records. Only AFTER the cascade are the kept,
+/// non-protected messages block-compressed (structure preserving, with their
+/// own clean rich CCR ids), so the cascade can never clobber a block-compressed
+/// message's reversibility.
 ///
 /// Messages the cascade keeps retain their exact block structure (tool ids,
 /// images, references, error tool results); messages it folds become reversible
-/// flat text. Block-compressed messages restore to exact blocks via
-/// [`restore_rich_message`]; cascade-folded messages restore to their flat text
-/// via the CCR store. `focus` biases the cascade's middle-band compression but
-/// not Phase-1 block compression yet.
+/// flat text. Block-compressed kept messages restore to exact blocks via
+/// [`restore_rich_message`]; cascade-folded messages restore to their verbatim
+/// flat text via the CCR store. Because the cascade counts the lossy flat
+/// projection (which under-represents opaque blocks like images), the actual
+/// rich output is recounted at its true size and fails closed
+/// ([`OghamError::BudgetExceeded`]) if it exceeds the budget. `focus` biases the
+/// cascade's middle-band compression.
 pub async fn compact_rich(
     messages: Vec<RichMessage>,
     config: CompactRichConfig,
@@ -218,24 +232,21 @@ pub async fn compact_rich(
         }
     };
 
-    // Flatten the input for protected-tail evidence and the full-delta folds.
-    let input_flats: Vec<Message> = messages.iter().map(rich_to_agent_flat_lossy).collect();
-    let protected = protected_report(&input_flats, &config.agent_policy, counter.as_ref());
-
-    // Phase 1: block-aware text compression (structure preserving, CCR-backed).
     let rich_ccr = if config.rich.reversible {
         ccr_store.as_ref()
     } else {
         None
     };
-    let rich_compressed = compress_rich_messages(messages, rich_ccr, &config.rich).await?;
-    let proj_flats: Vec<Message> = rich_compressed
-        .iter()
-        .map(rich_to_agent_flat_lossy)
-        .collect();
 
-    // Phase 2: conversation cascade on the flat projection.
-    let mut working = proj_flats.clone();
+    // The conversation cascade runs FIRST, on the verbatim flat projection, so
+    // it clears/drops/summarizes the ORIGINAL (uncompressed) content — storing
+    // verbatim CCR originals and producing correct fold records and token
+    // counts. Block-aware text compression then runs only on kept messages, so
+    // the cascade can never clobber a block-compressed message's CCR id.
+    let input_flats: Vec<Message> = messages.iter().map(rich_to_agent_flat_lossy).collect();
+    let protected = protected_report(&input_flats, &config.agent_policy, counter.as_ref());
+
+    let mut working = input_flats.clone();
     let saved = tag_original_indices(&mut working);
 
     let pipeline = DefaultCompressionPipeline::with_builtin_compressors(
@@ -268,8 +279,7 @@ pub async fn compact_rich(
         );
     }
 
-    // Capture the index mapping and cascade-kept flags before fold building
-    // restores the index tags, and before cache annotations are applied.
+    // Capture mapping + cascade-kept flags before fold building cleans the tags.
     let mapping: Vec<Option<usize>> = working
         .iter()
         .map(|m| {
@@ -282,18 +292,56 @@ pub async fn compact_rich(
         .iter()
         .zip(&mapping)
         .map(|(m, idx)| {
-            idx.is_some_and(|i| i < proj_flats.len() && m.content == proj_flats[i].content)
+            idx.is_some_and(|i| i < input_flats.len() && m.content == input_flats[i].content)
         })
         .collect();
 
-    let folds = build_fold_records(&input_flats, &mut working, &saved, counter.as_ref());
+    let mut folds = build_fold_records(&input_flats, &mut working, &saved, counter.as_ref());
     let cache_plan =
         apply_cache_policy(&mut working, config.cache, counter.as_ref(), &mut warnings);
 
-    let messages = reconstruct_rich(&working, &rich_compressed, &mapping, &kept_by_cascade);
+    // Block-compress kept, non-protected messages (structure preserving, with
+    // clean rich CCR ids and their own Compressed fold records).
+    let protected_set: BTreeSet<usize> = protected
+        .protected_message_indices
+        .iter()
+        .copied()
+        .collect();
+    let (out, block_folds) = reconstruct_and_compress(
+        &working,
+        &messages,
+        &mapping,
+        &kept_by_cascade,
+        &protected_set,
+        rich_ccr,
+        &config.rich,
+        counter.as_ref(),
+    )
+    .await?;
+    folds.extend(block_folds);
+
+    // Fail-closed budget guard: the flat projection under-counts opaque blocks
+    // (image bytes, tool inputs), so recount the ACTUAL emitted rich messages
+    // and fail closed if they exceed the budget.
+    if let Some(budget) = &config.budget {
+        let limit = effective_limit(budget, counter.count_kind());
+        let actual: usize = out
+            .iter()
+            .map(|m| rich_message_tokens(m, counter.as_ref()))
+            .sum();
+        if actual > limit {
+            return Err(OghamError::BudgetExceeded {
+                needed: actual,
+                limit,
+            });
+        }
+        if let Some(report) = budget_report.as_mut() {
+            report.tokens_final = actual;
+        }
+    }
 
     Ok(CompactRichResult {
-        messages,
+        messages: out,
         folds,
         protected,
         budget_report,
@@ -303,43 +351,154 @@ pub async fn compact_rich(
     })
 }
 
-/// Rebuild rich output from the compacted flat projection: cascade-kept
-/// messages recover their block structure; folded/inserted ones stay flat text.
-fn reconstruct_rich(
+/// Rebuild rich output from the compacted flat projection, block-compressing
+/// the kept, non-protected messages.
+///
+/// A message the cascade kept (working content unchanged from its verbatim
+/// projection) recovers its original block structure; if it is not protected it
+/// is then block-compressed (structure preserving, CCR-backed) and earns a
+/// `Compressed` fold. A message the cascade folded stays as flat text carrying
+/// the cascade's own (correct, verbatim) CCR id. Every emitted message mirrors
+/// the final flat cache annotation exactly.
+#[allow(clippy::too_many_arguments)]
+async fn reconstruct_and_compress(
     working: &[Message],
-    rich_compressed: &[RichMessage],
+    originals: &[RichMessage],
     mapping: &[Option<usize>],
     kept_by_cascade: &[bool],
-) -> Vec<RichMessage> {
-    working
+    protected: &BTreeSet<usize>,
+    rich_ccr: Option<&Arc<dyn CcrStore>>,
+    policy: &RichCompressionPolicy,
+    counter: &dyn TokenCounter,
+) -> Result<(Vec<RichMessage>, Vec<FoldRecord>)> {
+    // Collect kept, non-protected originals and block-compress them in one pass.
+    let mut compress_positions: Vec<(usize, usize)> = Vec::new();
+    for (pos, kept) in kept_by_cascade.iter().enumerate() {
+        if *kept
+            && let Some(idx) = mapping[pos]
+            && !protected.contains(&idx)
+        {
+            compress_positions.push((pos, idx));
+        }
+    }
+    let batch: Vec<RichMessage> = compress_positions
         .iter()
-        .enumerate()
-        .map(|(pos, flat)| {
-            if kept_by_cascade[pos]
-                && let Some(idx) = mapping[pos]
-            {
-                let mut rich = rich_compressed[idx].clone();
-                match flat.metadata.get(meta_keys::CACHE_CONTROL) {
-                    Some(cache) => {
-                        rich.metadata
-                            .insert(meta_keys::CACHE_CONTROL.to_string(), cache.clone());
-                    }
-                    None => {
-                        rich.metadata.remove(meta_keys::CACHE_CONTROL);
-                    }
-                }
-                rich
-            } else {
-                let mut metadata = flat.metadata.clone();
-                metadata.remove(ORIGINAL_INDEX_KEY);
-                RichMessage {
-                    role: flat.role.clone(),
-                    content: MessageContent::Text(flat.content.clone()),
-                    metadata,
-                }
+        .map(|(_, idx)| originals[*idx].clone())
+        .collect();
+    let compressed = compress_rich_messages(batch, rich_ccr, policy).await?;
+    let mut compressed_by_pos: HashMap<usize, RichMessage> = compress_positions
+        .iter()
+        .map(|(pos, _)| *pos)
+        .zip(compressed)
+        .collect();
+
+    let mut out = Vec::with_capacity(working.len());
+    let mut folds = Vec::new();
+    for (pos, flat) in working.iter().enumerate() {
+        let mut rich = if let Some(comp) = compressed_by_pos.remove(&pos) {
+            let idx = mapping[pos].expect("compressed positions carry an original index");
+            if comp.content != originals[idx].content {
+                folds.push(block_compression_fold(
+                    idx,
+                    pos,
+                    &originals[idx],
+                    &comp,
+                    counter,
+                ));
             }
-        })
-        .collect()
+            comp
+        } else if kept_by_cascade[pos]
+            && let Some(idx) = mapping[pos]
+        {
+            originals[idx].clone()
+        } else {
+            let mut metadata = flat.metadata.clone();
+            metadata.remove(ORIGINAL_INDEX_KEY);
+            RichMessage {
+                role: flat.role.clone(),
+                content: MessageContent::Text(flat.content.clone()),
+                metadata,
+            }
+        };
+        match flat.metadata.get(meta_keys::CACHE_CONTROL) {
+            Some(cache) => {
+                rich.metadata
+                    .insert(meta_keys::CACHE_CONTROL.to_string(), cache.clone());
+            }
+            None => {
+                rich.metadata.remove(meta_keys::CACHE_CONTROL);
+            }
+        }
+        out.push(rich);
+    }
+    Ok((out, folds))
+}
+
+fn block_compression_fold(
+    original_index: usize,
+    replacement_index: usize,
+    original: &RichMessage,
+    compressed: &RichMessage,
+    counter: &dyn TokenCounter,
+) -> FoldRecord {
+    let ccr_id = compressed.metadata.get(meta_keys::CCR_ID).cloned();
+    let id = ccr_id.clone().unwrap_or_else(|| {
+        let payload = serde_json::to_string(original).unwrap_or_default();
+        format!("fold-{}", compute_key(payload.as_bytes()))
+    });
+    FoldRecord {
+        id,
+        kind: FoldKind::Compressed,
+        original_range: original_index..original_index + 1,
+        replacement_index: Some(replacement_index),
+        original_roles: vec![original.role.clone()],
+        original_tokens: rich_message_tokens(original, counter),
+        replacement_tokens: rich_message_tokens(compressed, counter),
+        ccr_id,
+        marker: None,
+    }
+}
+
+/// Token estimate for a rich message that counts opaque block payloads (image
+/// bytes, tool inputs, references) at their real size — not the lossy
+/// flat-render placeholder the budget cascade sees.
+fn rich_message_tokens(message: &RichMessage, counter: &dyn TokenCounter) -> usize {
+    let body = match &message.content {
+        MessageContent::Text(text) => counter.count(text),
+        MessageContent::Blocks(blocks) => blocks.iter().map(|b| block_tokens(b, counter)).sum(),
+    };
+    body + OVERHEAD_PER_MESSAGE
+}
+
+fn block_tokens(block: &ContentBlock, counter: &dyn TokenCounter) -> usize {
+    match block {
+        ContentBlock::Text { text } | ContentBlock::Thinking { text } => counter.count(text),
+        ContentBlock::Image { source, alt } => {
+            let body = match source {
+                ImageSource::Base64 { data, .. } => counter.count(data),
+                ImageSource::Url { url } => counter.count(url),
+            };
+            body + alt.as_deref().map_or(0, |a| counter.count(a))
+        }
+        ContentBlock::ToolUse { name, input, .. } => {
+            counter.count(name) + counter.count(&input.to_string())
+        }
+        ContentBlock::ToolResult { content, .. } => {
+            content.iter().map(|b| block_tokens(b, counter)).sum()
+        }
+        ContentBlock::Reference {
+            id_or_path,
+            metadata,
+            ..
+        } => counter.count(id_or_path) + metadata.values().map(|v| counter.count(v)).sum::<usize>(),
+    }
+}
+
+fn effective_limit(budget: &ContextBudget, kind: TokenCountKind) -> usize {
+    let margin = budget.safety_margin.unwrap_or_else(|| kind.safety_margin());
+    budget
+        .total_limit
+        .saturating_sub(((budget.total_limit as f64) * margin).ceil() as usize)
 }
 
 fn rich_to_agent_flat_lossy(message: &RichMessage) -> Message {
@@ -866,5 +1025,98 @@ mod tests {
 
         assert_eq!(result.cache_plan.policy, "openai");
         assert_eq!(result.cache_plan.stable_prefix_messages, 3);
+    }
+
+    #[tokio::test]
+    async fn compact_rich_fails_closed_on_oversize_opaque_blocks() {
+        // Image base64 renders to a tiny flat placeholder, so the cascade
+        // under-counts it. The post-reconstruction recount must catch the real
+        // size and fail closed instead of returning an over-budget payload.
+        let store: Arc<dyn CcrStore> = Arc::new(InMemoryCcrStore::new());
+        let image = || {
+            RichMessage::blocks(
+                "assistant",
+                vec![ContentBlock::Image {
+                    source: ImageSource::Base64 {
+                        media_type: "image/png".into(),
+                        data: "A".repeat(200_000),
+                    },
+                    alt: None,
+                }],
+            )
+        };
+        let result = compact_rich(
+            vec![
+                RichMessage::text("system", "sys"),
+                image(),
+                image(),
+                image(),
+                RichMessage::text("user", "latest"),
+            ],
+            CompactRichConfig {
+                budget: Some(ContextBudget {
+                    total_limit: 200,
+                    safety_margin: Some(0.0),
+                }),
+                ccr: CcrPolicy::Store(store),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(OghamError::BudgetExceeded { .. })),
+            "oversize opaque blocks must fail closed, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_rich_cleared_tool_message_restores_verbatim_original() {
+        // The cascade runs on the verbatim projection, so a cleared tool result
+        // must store and advertise the EXACT original — never a lossy projection.
+        let store: Arc<dyn CcrStore> = Arc::new(InMemoryCcrStore::new());
+        let original_text = large_tool_output(7);
+        let mut tool = RichMessage::text("tool", original_text.clone());
+        tool.metadata
+            .insert(meta_keys::TOOL_NAME.to_string(), "shell".into());
+
+        let result = compact_rich(
+            vec![tool, RichMessage::text("user", "latest")],
+            CompactRichConfig {
+                agent_policy: AgentPolicy {
+                    keep_recent_tool_results: 0,
+                    clear_old_tool_results: true,
+                    ..Default::default()
+                },
+                ccr: CcrPolicy::Store(store.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let cleared = result
+            .folds
+            .iter()
+            .find(|f| f.kind == FoldKind::Cleared)
+            .expect("a Cleared fold");
+        let ccr_id = cleared
+            .ccr_id
+            .as_ref()
+            .expect("cleared fold carries a ccr id");
+        let stored = store
+            .retrieve(ccr_id)
+            .await
+            .unwrap()
+            .expect("cleared original must be retrievable");
+        assert_eq!(
+            stored, original_text,
+            "cleared fold must resolve to the verbatim original, not a lossy projection"
+        );
+        assert_eq!(
+            cleared.original_tokens,
+            counter_for_model("default").count(&original_text),
+            "cleared fold original_tokens must describe the verbatim original"
+        );
     }
 }
