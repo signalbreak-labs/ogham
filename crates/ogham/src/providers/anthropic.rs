@@ -146,10 +146,11 @@ pub fn render_cache_control(messages: &[Message]) -> AnthropicMessages {
 /// A `tool_use` is rendered natively only if the immediately following user turn
 /// answers it (a dangling call is linearized to text); a `tool_result` only if
 /// the immediately preceding assistant turn issued its `tool_use` (orphan, late,
-/// or duplicate results are linearized to text). When any source message of a
-/// coalesced turn carries the `cache_control` annotation, the breakpoint is
-/// placed on that turn's **last** block. Turns that render to no blocks are
-/// skipped.
+/// or duplicate results are linearized to text). A `cache_control` breakpoint is
+/// honored only when the coalesced turn's **last** source message is the
+/// annotated one, so the breakpoint is never placed past volatile messages that
+/// were merged in after the stable boundary; otherwise it is conservatively
+/// dropped. Turns that render to no blocks are skipped.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Side {
     Assistant,
@@ -193,7 +194,13 @@ pub fn render_cache_control_rich(messages: &[RichMessage]) -> AnthropicMessages 
         match segments.last_mut() {
             Some(seg) if seg.side == side => {
                 seg.msgs.push(m);
-                seg.cache |= cache;
+                // Last-message-wins: the breakpoint goes on the segment's last
+                // block, which is correct only when the *last* coalesced message
+                // is the annotated (stable-prefix boundary) one. If an earlier
+                // message in the segment was the boundary, we conservatively drop
+                // the breakpoint rather than cache through the volatile messages
+                // that got merged after it.
+                seg.cache = cache;
             }
             _ => segments.push(Segment {
                 side,
@@ -800,6 +807,44 @@ mod tests {
         let a = &rendered.messages[0]["content"][0];
         assert_eq!(a["type"], "text");
         assert_eq!(a["text"], "[tool_use shell (call_1)]");
+    }
+
+    #[test]
+    fn cache_breakpoint_not_placed_past_coalesced_volatile_messages() {
+        // Two consecutive user messages coalesce; only the FIRST (stable) is
+        // annotated, the second is volatile. The breakpoint must not move onto
+        // the merged segment's last (volatile) block.
+        let mut stable = RichMessage::text("user", "stable prefix");
+        stable.metadata.insert(
+            meta_keys::CACHE_CONTROL.to_string(),
+            "ephemeral".to_string(),
+        );
+        let volatile = RichMessage::text("user", "volatile suffix");
+        let rendered = render_cache_control_rich(&[stable, volatile]);
+        assert_eq!(rendered.messages.len(), 1);
+        let content = rendered.messages[0]["content"].as_array().unwrap();
+        assert!(
+            content.iter().all(|b| b.get("cache_control").is_none()),
+            "no breakpoint should cache through the coalesced volatile message"
+        );
+    }
+
+    #[test]
+    fn cache_breakpoint_kept_when_annotated_message_is_last() {
+        // When the annotated message is the segment's last, the breakpoint is
+        // placed correctly on its block.
+        let plain = RichMessage::text("user", "earlier");
+        let mut boundary = RichMessage::text("user", "boundary");
+        boundary.metadata.insert(
+            meta_keys::CACHE_CONTROL.to_string(),
+            "ephemeral".to_string(),
+        );
+        let rendered = render_cache_control_rich(&[plain, boundary]);
+        let content = rendered.messages[0]["content"].as_array().unwrap();
+        assert_eq!(
+            content.last().unwrap()["cache_control"]["type"],
+            "ephemeral"
+        );
     }
 
     #[test]

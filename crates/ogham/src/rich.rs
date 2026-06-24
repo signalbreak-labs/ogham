@@ -531,17 +531,107 @@ fn recount_rich_cache_plan(
     // Content-keyed providers identify the prefix by content. The flat pass keyed
     // it off the lossy projection, which collapses opaque blocks (two different
     // images both render `[image: png]`) and predates block compression, so the
-    // key could collide or go stale. Recompute it from a canonical serialization
-    // of the final rich prefix, which includes the opaque block payloads.
+    // key could collide or go stale. Recompute it from a canonical, content-only
+    // serialization of the final rich prefix: opaque block payloads are included,
+    // but the non-content `metadata` maps (whose serialized key order is not
+    // canonical and which are not provider-visible) are excluded, so a
+    // metadata-only change can't invalidate an otherwise-identical prompt.
     plan.content_key = match policy {
         CachePolicy::OpenAi { .. } | CachePolicy::Gemini { .. } | CachePolicy::Generic { .. } => {
-            (prefix_len > 0).then(|| {
-                let serialized = serde_json::to_string(prefix).unwrap_or_default();
-                format!("rich-{}", compute_key(serialized.as_bytes()))
-            })
+            (prefix_len > 0)
+                .then(|| format!("rich-{}", compute_key(canonical_prefix(prefix).as_bytes())))
         }
         CachePolicy::Anthropic { .. } | CachePolicy::None => None,
     };
+}
+
+/// A canonical, content-only string identity for a rich prefix: role + ordered
+/// block payloads, with all non-content `metadata` excluded so the key depends
+/// only on the provider-visible content. Opaque payloads (image bytes, tool
+/// inputs) are included at full fidelity.
+fn canonical_prefix(prefix: &[RichMessage]) -> String {
+    let mut out = String::new();
+    for m in prefix {
+        out.push_str(&m.role);
+        out.push('\u{1}');
+        match &m.content {
+            MessageContent::Text(text) => {
+                out.push('T');
+                out.push_str(text);
+            }
+            MessageContent::Blocks(blocks) => {
+                for block in blocks {
+                    canonical_block(block, &mut out);
+                }
+            }
+        }
+        out.push('\u{1e}');
+    }
+    out
+}
+
+fn canonical_block(block: &ContentBlock, out: &mut String) {
+    match block {
+        ContentBlock::Text { text } => {
+            out.push_str("t:");
+            out.push_str(text);
+        }
+        ContentBlock::Thinking { text } => {
+            out.push_str("k:");
+            out.push_str(text);
+        }
+        ContentBlock::Image { source, alt } => {
+            out.push_str("i:");
+            match source {
+                ImageSource::Base64 { media_type, data } => {
+                    out.push_str("b:");
+                    out.push_str(media_type);
+                    out.push('\u{1f}');
+                    out.push_str(data);
+                }
+                ImageSource::Url { url } => {
+                    out.push_str("u:");
+                    out.push_str(url);
+                }
+            }
+            out.push('\u{1f}');
+            out.push_str(alt.as_deref().unwrap_or(""));
+        }
+        ContentBlock::ToolUse { id, name, input } => {
+            out.push_str("U:");
+            out.push_str(id);
+            out.push('\u{1f}');
+            out.push_str(name);
+            out.push('\u{1f}');
+            // serde_json::Value serializes object keys in sorted (BTreeMap) order,
+            // so this is canonical.
+            out.push_str(&input.to_string());
+        }
+        ContentBlock::ToolResult {
+            tool_use_id,
+            is_error,
+            content,
+        } => {
+            out.push_str("R:");
+            out.push_str(tool_use_id);
+            out.push(if *is_error { '1' } else { '0' });
+            out.push('[');
+            for inner in content {
+                canonical_block(inner, out);
+            }
+            out.push(']');
+        }
+        // Reference `metadata` is intentionally excluded (non-content, non-canonical).
+        ContentBlock::Reference {
+            kind, id_or_path, ..
+        } => {
+            out.push_str("F:");
+            out.push_str(kind);
+            out.push('\u{1f}');
+            out.push_str(id_or_path);
+        }
+    }
+    out.push('\u{1d}');
 }
 
 /// Token estimate for a rich message that counts opaque block payloads (image
@@ -1156,6 +1246,41 @@ mod tests {
         assert_ne!(
             plan_a.content_key, plan_b.content_key,
             "different image bytes must yield different cache content keys"
+        );
+    }
+
+    #[test]
+    fn rich_content_key_ignores_metadata() {
+        // A metadata-only change must not alter the cache content key (metadata
+        // is not provider-visible content, and its map order is not canonical).
+        let counter = counter_for_model("default");
+        let base = RichMessage::blocks(
+            "user",
+            vec![ContentBlock::Image {
+                source: ImageSource::Base64 {
+                    media_type: "image/png".into(),
+                    data: "AAAA".into(),
+                },
+                alt: None,
+            }],
+        );
+        let mut with_meta = base.clone();
+        with_meta.metadata.insert("ogham.a".into(), "1".into());
+        with_meta.metadata.insert("ogham.b".into(), "2".into());
+        let policy = CachePolicy::OpenAi {
+            stable_suffix_messages: 1,
+        };
+        let plan = || CachePlan {
+            stable_prefix_messages: 1,
+            stable_suffix_messages: 1,
+            ..Default::default()
+        };
+        let (mut p1, mut p2) = (plan(), plan());
+        recount_rich_cache_plan(&mut p1, &[base], policy, "gpt-4o", counter.as_ref());
+        recount_rich_cache_plan(&mut p2, &[with_meta], policy, "gpt-4o", counter.as_ref());
+        assert_eq!(
+            p1.content_key, p2.content_key,
+            "a metadata-only change must not change the content key"
         );
     }
 
