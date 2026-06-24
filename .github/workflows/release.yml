@@ -40,8 +40,12 @@ jobs:
         run: |
           cargo fmt --all --check
           cargo clippy --workspace --all-targets -- -D warnings
+          cargo clippy -p ogham --all-targets --no-default-features -- -D warnings
           cargo test --workspace
           cargo test -p ogham --features tiktoken
+          cargo test -p ogham --no-default-features --all-targets
+          cargo test -p ogham --no-default-features --features ccr-sqlite --all-targets
+          cargo test -p ogham --no-default-features --features ccr-fjall --all-targets
 
   create-release:
     name: Create GitHub release

@@ -17,18 +17,18 @@ versions may contain breaking changes).
 - `ogham::rich`: block-aware compression. `compress_rich_messages()` compresses
   the bulky text *inside* `RichMessage` blocks (routing each text payload through
   the content-type compressors) while preserving tool-call ids, non-text blocks
-  (images/references), and roles — so a host never flattens structured content to
-  a JSON string. Reversibility is message-level: each rewritten message's original
-  blocks are stored as a `CcrPayload` and tagged with `meta_keys::CCR_ID`, and
-  `restore_rich_message()` returns the exact original. Saves are awaited and fail
-  closed.
+  (images/references), error tool results, and roles — so a host never flattens
+  structured content to a JSON string. Reversibility is message-level: each
+  rewritten message's original blocks are stored as a `CcrPayload` and tagged
+  with `meta_keys::CCR_ID`, and `restore_rich_message()` returns the exact
+  original. Saves are awaited and fail closed.
 - Block-aware CCR payloads: `ccr::CcrPayload` (media type + bytes + metadata)
   with `CcrStore::save_payload` / `retrieve_payload` default methods, so every
   store can persist and restore exact structured originals (e.g. serialized
   `RichMessage` blocks) for lossless undo. The default impl wraps the payload in
   a self-describing envelope over the text store (UTF-8 verbatim, binary
-  hex-encoded); `retrieve_payload` degrades a plain string to a `text/plain`
-  payload.
+  hex-encoded); `retrieve_payload` degrades a plain string, including JSON that
+  merely collides with the envelope marker key, to a `text/plain` payload.
 - `ogham_core::content`: a host-neutral rich message model — `RichMessage`,
   `MessageContent` (text or blocks), and `ContentBlock`
   (text/thinking/image/tool-use/tool-result/reference). It round-trips
@@ -69,7 +69,9 @@ versions may contain breaking changes).
 - `CompactResult.cache_plan` (`CachePlan`) now reports stable-prefix accounting:
   `stable_prefix_messages`, `stable_prefix_tokens`, `cacheable`, a content-keyed
   `content_key` (set for OpenAI/Gemini/Generic, `None` for Anthropic), and
-  `notes`. (Additive fields on a returned struct.)
+  `notes`. `CachePolicy::None` reports no stable prefix and clears stale cache
+  annotations, while Anthropic planning replaces old breakpoint annotations
+  instead of accumulating them. (Additive fields on a returned struct.)
 - The heavy embedded CCR stores are now feature-gated: `ccr-sqlite` (`rusqlite`)
   and `ccr-fjall` (`fjall`). Both remain in the default feature set, so existing
   builds are unchanged; `cargo build --no-default-features` now yields a lean,

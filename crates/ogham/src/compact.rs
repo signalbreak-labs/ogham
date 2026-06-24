@@ -152,9 +152,9 @@ pub async fn compact_conversation(
     config: CompactConfig,
 ) -> Result<CompactResult> {
     let model = config.model.as_deref().unwrap_or("default");
-    let counter = crate::token_counter::HeuristicCounter::for_model(model);
+    let counter = crate::token_counter::counter_for_model(model);
     let original = messages.clone();
-    let protected = protected_report(&original, &config.agent_policy, &counter);
+    let protected = protected_report(&original, &config.agent_policy, counter.as_ref());
     let mut warnings = Vec::new();
 
     let ccr_store = match (&config.ccr, config.compression.reversible) {
@@ -189,7 +189,7 @@ pub async fn compact_conversation(
             budget::enforce_budget(
                 &mut working,
                 budget,
-                &counter,
+                counter.as_ref(),
                 &pipeline,
                 &config.agent_policy,
                 ccr_store.clone(),
@@ -203,8 +203,14 @@ pub async fn compact_conversation(
         );
     }
 
-    let folds = build_fold_records(&original, &mut working, &saved_internal_values, &counter);
-    let cache_plan = apply_cache_policy(&mut working, config.cache, &counter, &mut warnings);
+    let folds = build_fold_records(
+        &original,
+        &mut working,
+        &saved_internal_values,
+        counter.as_ref(),
+    );
+    let cache_plan =
+        apply_cache_policy(&mut working, config.cache, counter.as_ref(), &mut warnings);
 
     Ok(CompactResult {
         messages: working,
@@ -442,8 +448,18 @@ fn apply_cache_policy(
     counter: &dyn TokenCounter,
     warnings: &mut Vec<String>,
 ) -> CachePlan {
+    if policy == CachePolicy::None {
+        for msg in messages.iter_mut() {
+            msg.metadata.remove(meta_keys::CACHE_CONTROL);
+        }
+        return CachePlan {
+            policy: "none".to_string(),
+            ..CachePlan::default()
+        };
+    }
+
     let (policy_name, stable_suffix_messages, strategy) = match policy {
-        CachePolicy::None => ("none", 0, None),
+        CachePolicy::None => unreachable!("handled above"),
         CachePolicy::Generic {
             stable_suffix_messages,
         } => (
@@ -644,6 +660,57 @@ mod tests {
         // OpenAI is content-keyed; no fake cache_control annotations.
         assert!(result.cache_plan.content_key.is_some());
         assert!(result.cache_plan.annotated_message_indices.is_empty());
+    }
+
+    #[tokio::test]
+    async fn compact_conversation_none_cache_plan_reports_no_prefix() {
+        let mut system = Message::new("system", "x".repeat(6000));
+        system.metadata.insert(
+            meta_keys::CACHE_CONTROL.to_string(),
+            "ephemeral".to_string(),
+        );
+
+        let result = compact_conversation(
+            vec![system, Message::new("user", "latest")],
+            CompactConfig::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.cache_plan.policy, "none");
+        assert_eq!(result.cache_plan.stable_prefix_messages, 0);
+        assert_eq!(result.cache_plan.stable_prefix_tokens, 0);
+        assert!(!result.cache_plan.cacheable);
+        assert!(result.cache_plan.content_key.is_none());
+        assert!(result.cache_plan.annotated_message_indices.is_empty());
+        assert!(
+            result
+                .messages
+                .iter()
+                .all(|m| !m.metadata.contains_key(meta_keys::CACHE_CONTROL))
+        );
+    }
+
+    #[cfg(feature = "tiktoken")]
+    #[tokio::test]
+    async fn compact_conversation_uses_exact_counter_when_available() {
+        let result = compact_conversation(
+            vec![Message::new("user", "hello")],
+            CompactConfig {
+                budget: Some(ContextBudget {
+                    total_limit: 1000,
+                    safety_margin: None,
+                }),
+                model: Some("gpt-4o".to_string()),
+                ..CompactConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let report = result.budget_report.expect("budget report");
+        assert_eq!(report.count_kind, ogham_core::TokenCountKind::Exact);
+        assert_eq!(report.safety_margin, 0.0);
     }
 
     #[test]

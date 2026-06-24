@@ -85,37 +85,42 @@ fn encode_payload(payload: &CcrPayload) -> String {
 /// Decode a stored string into a payload, falling back to `text/plain` for a
 /// plain string that is not an envelope.
 fn decode_payload(stored: &str) -> CcrPayload {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(stored)
-        && value.get(PAYLOAD_MARKER).is_some()
-    {
-        let media_type = value["media_type"]
-            .as_str()
-            .unwrap_or("application/octet-stream")
-            .to_string();
-        let data = value["data"].as_str().unwrap_or("");
-        let bytes = match value["enc"].as_str() {
-            Some("hex") => from_hex(data),
-            _ => data.as_bytes().to_vec(),
-        };
-        let metadata = value["metadata"]
-            .as_object()
-            .map(|map| {
-                map.iter()
-                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                    .collect()
-            })
-            .unwrap_or_default();
-        return CcrPayload {
-            media_type,
-            bytes,
-            metadata,
-        };
+    if let Some(payload) = try_decode_payload(stored) {
+        return payload;
     }
     CcrPayload {
         media_type: "text/plain; charset=utf-8".to_string(),
         bytes: stored.as_bytes().to_vec(),
         metadata: HashMap::new(),
     }
+}
+
+fn try_decode_payload(stored: &str) -> Option<CcrPayload> {
+    let value = serde_json::from_str::<serde_json::Value>(stored).ok()?;
+    if value.get(PAYLOAD_MARKER)?.as_u64()? != 1 {
+        return None;
+    }
+    let media_type = value.get("media_type")?.as_str()?.to_string();
+    let data = value.get("data")?.as_str()?;
+    let bytes = match value.get("enc")?.as_str()? {
+        "utf8" => data.as_bytes().to_vec(),
+        "hex" => from_hex(data)?,
+        _ => return None,
+    };
+    let metadata = value
+        .get("metadata")
+        .and_then(|metadata| metadata.as_object())
+        .map(|map| {
+            map.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(CcrPayload {
+        media_type,
+        bytes,
+        metadata,
+    })
 }
 
 fn to_hex(bytes: &[u8]) -> String {
@@ -127,10 +132,13 @@ fn to_hex(bytes: &[u8]) -> String {
     out
 }
 
-fn from_hex(s: &str) -> Vec<u8> {
+fn from_hex(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
     s.as_bytes()
         .chunks_exact(2)
-        .filter_map(|pair| {
+        .map(|pair| {
             let hi = (pair[0] as char).to_digit(16)?;
             let lo = (pair[1] as char).to_digit(16)?;
             Some(((hi << 4) | lo) as u8)
@@ -221,6 +229,34 @@ mod tests {
         store.save("p", "just text", None).await.unwrap();
         let payload = store.retrieve_payload("p").await.unwrap().unwrap();
         assert_eq!(payload.bytes, b"just text");
+        assert!(payload.media_type.starts_with("text/plain"));
+    }
+
+    #[tokio::test]
+    async fn retrieve_payload_on_plain_json_marker_collision_is_text() {
+        let store = in_memory::InMemoryCcrStore::new();
+        let plain = r#"{"ogham_ccr_payload":true,"data":"not an envelope"}"#;
+        store.save("plain-json", plain, None).await.unwrap();
+
+        let payload = store.retrieve_payload("plain-json").await.unwrap().unwrap();
+
+        assert_eq!(payload.bytes, plain.as_bytes());
+        assert!(payload.media_type.starts_with("text/plain"));
+    }
+
+    #[tokio::test]
+    async fn malformed_payload_envelope_falls_back_to_plain_text() {
+        let store = in_memory::InMemoryCcrStore::new();
+        let malformed = r#"{"ogham_ccr_payload":1,"media_type":"x","enc":"hex","data":"abc"}"#;
+        store.save("bad-envelope", malformed, None).await.unwrap();
+
+        let payload = store
+            .retrieve_payload("bad-envelope")
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(payload.bytes, malformed.as_bytes());
         assert!(payload.media_type.starts_with("text/plain"));
     }
 

@@ -28,13 +28,15 @@ pub const RICH_MESSAGE_MEDIA_TYPE: &str = "application/vnd.ogham.rich-message+js
 
 /// What a rich compression pass may rewrite.
 ///
-/// Tool-call ids, tool inputs, images, and references are always preserved.
+/// Tool-call ids, tool inputs, images, references, and error tool results are
+/// always preserved.
 #[derive(Debug, Clone)]
 pub struct RichCompressionPolicy {
     /// Compress standalone `Text` blocks. Default true.
     pub compress_text_blocks: bool,
-    /// Compress the text inside `ToolResult` blocks — usually the bulk of an
-    /// agent transcript. Default true.
+    /// Compress the text inside non-error `ToolResult` blocks — usually the
+    /// bulk of an agent transcript. Error tool results are always preserved.
+    /// Default true.
     pub compress_tool_results: bool,
     /// Compress `Thinking` blocks. Default false: reasoning is often wanted raw.
     pub compress_thinking: bool,
@@ -125,7 +127,12 @@ pub async fn restore_rich_message(
     let Some(payload) = ccr.retrieve_payload(id).await? else {
         return Ok(None);
     };
-    let text = String::from_utf8_lossy(&payload.bytes);
+    if payload.media_type != RICH_MESSAGE_MEDIA_TYPE {
+        return Ok(None);
+    }
+    let Ok(text) = String::from_utf8(payload.bytes) else {
+        return Ok(None);
+    };
     Ok(serde_json::from_str(&text).ok())
 }
 
@@ -168,6 +175,7 @@ fn compress_block<'a>(
                     text: compress_text(pipeline, role, text).await?,
                 })
             }
+            ContentBlock::ToolResult { is_error: true, .. } => Ok(block.clone()),
             ContentBlock::ToolResult {
                 tool_use_id,
                 is_error,
@@ -321,6 +329,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restore_ignores_non_rich_payloads() {
+        let store: Arc<dyn CcrStore> = Arc::new(InMemoryCcrStore::new());
+        store
+            .save_payload(
+                "not-rich",
+                &CcrPayload::text(
+                    "application/json",
+                    r#"{"role":"assistant","content":"looks rich"}"#,
+                ),
+            )
+            .await
+            .unwrap();
+        let mut msg = RichMessage::text("assistant", "compressed");
+        msg.metadata
+            .insert(meta_keys::CCR_ID.to_string(), "not-rich".to_string());
+
+        let restored = restore_rich_message(&msg, store.as_ref()).await.unwrap();
+
+        assert!(restored.is_none());
+    }
+
+    #[tokio::test]
     async fn unchanged_message_is_not_tagged() {
         let store: Arc<dyn CcrStore> = Arc::new(InMemoryCcrStore::new());
         // Small text that the compressors leave alone.
@@ -354,5 +384,36 @@ mod tests {
             out[0].content, msg.content,
             "thinking must be untouched by default"
         );
+    }
+
+    #[tokio::test]
+    async fn error_tool_results_are_preserved() {
+        let msg = RichMessage::blocks(
+            "assistant",
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "call_99".into(),
+                is_error: true,
+                content: vec![ContentBlock::Text {
+                    text: big_json_array(),
+                }],
+            }],
+        );
+
+        let out = compress_rich_messages(
+            vec![msg.clone()],
+            None,
+            &RichCompressionPolicy {
+                reversible: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            out[0].content, msg.content,
+            "error tool results must stay byte-for-byte visible"
+        );
+        assert!(!out[0].metadata.contains_key(meta_keys::CCR_ID));
     }
 }

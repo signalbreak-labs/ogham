@@ -11,7 +11,7 @@ pub enum CacheStrategy {
     Generic,
 }
 
-/// Annotate breakpoints. Returns how many breakpoints were set.
+/// Replace provider cache breakpoints. Returns how many breakpoints were set.
 ///
 /// Anthropic: set `metadata[CACHE_CONTROL] = "ephemeral"` on (in priority order,
 /// skipping duplicates, max 4):
@@ -19,7 +19,8 @@ pub enum CacheStrategy {
 ///   2. the message immediately BEFORE the last `stable_suffix` messages
 ///      (i.e. index len - stable_suffix - 1), if that index is > breakpoint 1's index
 ///
-/// Other strategies: remove any existing CACHE_CONTROL keys and return 0.
+/// Existing CACHE_CONTROL keys are removed before the requested strategy is
+/// applied. Non-Anthropic strategies remove all keys and return 0.
 ///
 /// `stable_suffix` is the number of trailing messages expected to change every
 /// turn (typically preserve_recent from ConversationConfig). Saturate at 0.
@@ -30,6 +31,10 @@ pub fn apply_cache_strategy(
 ) -> usize {
     match strategy {
         CacheStrategy::Anthropic => {
+            for msg in messages.iter_mut() {
+                msg.metadata.remove(meta_keys::CACHE_CONTROL);
+            }
+
             let mut indices = Vec::new();
 
             // 1. the LAST message with role == "system"
@@ -132,12 +137,36 @@ mod tests {
     fn anthropic_all_volatile_sets_nothing() {
         // stable_suffix >= len: no stable prefix, nothing to annotate.
         let mut msgs: Vec<Message> = (0..3).map(|_| Message::new("user", "m")).collect();
+        msgs[0].metadata.insert(
+            meta_keys::CACHE_CONTROL.to_string(),
+            "ephemeral".to_string(),
+        );
         let n = apply_cache_strategy(&mut msgs, CacheStrategy::Anthropic, 3);
         assert_eq!(n, 0);
         assert!(
             msgs.iter()
                 .all(|m| !m.metadata.contains_key(meta_keys::CACHE_CONTROL))
         );
+    }
+
+    #[test]
+    fn anthropic_replaces_stale_annotations() {
+        let mut msgs = vec![
+            Message::new("system", "sys"),
+            Message::new("user", "stable"),
+            Message::new("assistant", "volatile"),
+        ];
+        msgs[2].metadata.insert(
+            meta_keys::CACHE_CONTROL.to_string(),
+            "ephemeral".to_string(),
+        );
+
+        let n = apply_cache_strategy(&mut msgs, CacheStrategy::Anthropic, 1);
+
+        assert_eq!(n, 2);
+        assert!(msgs[0].metadata.contains_key(meta_keys::CACHE_CONTROL));
+        assert!(msgs[1].metadata.contains_key(meta_keys::CACHE_CONTROL));
+        assert!(!msgs[2].metadata.contains_key(meta_keys::CACHE_CONTROL));
     }
 
     #[test]
