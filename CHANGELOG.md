@@ -18,7 +18,8 @@ versions may contain breaking changes).
   message's last block. `Thinking`/`Reference` blocks (no native input shape)
   render as text so their content still reaches the model. Adds
   `min_cacheable_prefix_tokens(model)` for per-model Anthropic cache thresholds
-  (2048 for Haiku, 1024 otherwise).
+  (a documented, versioned table — e.g. Haiku 4.5 = 4096, Opus 4.8 = 1024,
+  Opus 4.5/4.6 = 4096 — defaulting to 1024 for unknown models).
 - Focus-hint steering across all built-in compressors. Previously only
   `SmartCrusher` consumed `CompactConfig.focus`; now `LogStripper`,
   `AstCodeCompressor`, and `SemanticCompressor` do too, via the shared

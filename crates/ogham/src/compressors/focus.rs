@@ -26,8 +26,7 @@ pub fn matches(text: &str, focus: &[String]) -> bool {
     if focus.is_empty() {
         return false;
     }
-    let lower = text.to_lowercase();
-    focus.iter().any(|t| lower.contains(t.as_str()))
+    focus.iter().any(|t| contains_ignore_case(text, t))
 }
 
 /// Score how strongly `text` matches the focus terms: matched-term count times
@@ -37,9 +36,27 @@ pub fn relevance(text: &str, focus: &[String]) -> f64 {
     if focus.is_empty() {
         return 0.0;
     }
-    let lower = text.to_lowercase();
-    let hits = focus.iter().filter(|t| lower.contains(t.as_str())).count();
+    let hits = focus
+        .iter()
+        .filter(|t| contains_ignore_case(text, t))
+        .count();
     hits as f64 * FOCUS_TERM_BOOST
+}
+
+/// Case-insensitive substring test. `needle` is already lowercased by
+/// [`terms`]. Avoids allocating a lowercased copy of `haystack` on the common
+/// all-ASCII path (these compressors run per log line / code line), falling
+/// back to a full lowercasing only when non-ASCII is involved — so the result
+/// is identical to `haystack.to_lowercase().contains(needle)`.
+fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if haystack.is_ascii() && needle.is_ascii() {
+        let (h, n) = (haystack.as_bytes(), needle.as_bytes());
+        return n.len() <= h.len() && h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n));
+    }
+    haystack.to_lowercase().contains(needle)
 }
 
 #[cfg(test)]
@@ -71,5 +88,27 @@ mod tests {
         assert_eq!(relevance("only auth", &f), 100.0);
         assert_eq!(relevance("nothing", &f), 0.0);
         assert_eq!(relevance("auth", &[]), 0.0);
+    }
+
+    #[test]
+    fn contains_ignore_case_matches_lowercasing_semantics() {
+        // ASCII fast path and the unicode fallback must agree with the
+        // reference `to_lowercase().contains` behavior.
+        for (hay, needle) in [
+            ("checking AUTH flow", "auth"),
+            ("no match here", "auth"),
+            ("Visited the CAFÉ today", "café"), // non-ASCII -> fallback
+            ("ASCII text", "ascii"),
+        ] {
+            let reference = hay.to_lowercase().contains(needle);
+            assert_eq!(
+                contains_ignore_case(hay, needle),
+                reference,
+                "mismatch for {hay:?} / {needle:?}"
+            );
+        }
+        // Empty needle is vacuously contained; over-long needle is not.
+        assert!(contains_ignore_case("x", ""));
+        assert!(!contains_ignore_case("x", "xxxx"));
     }
 }

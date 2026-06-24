@@ -510,15 +510,18 @@ impl LogCompressor {
             }
         }
         // Focus bucket: retain lines matching the caller's focus hint even if
-        // they are plain info/debug. A boosted score keeps them through the
-        // final truncation, but stays below errors/fails (1.0) so focus never
-        // evicts a diagnostic.
+        // they are plain info/debug. A match raises the line's effective score
+        // to at least FOCUS_LINE_SCORE so it survives the final truncation. We
+        // take the max with the intrinsic score and `replace` (not `insert`)
+        // any existing entry, so the boost applies regardless of bucket order
+        // and an already-selected error keeps its higher score (1.0) — focus
+        // never demotes, and never evicts, a diagnostic.
         if !focus.is_empty() {
             for line in log_lines {
                 if crate::compressors::focus::matches(&line.content, focus) {
                     let mut boosted = line.clone();
-                    boosted.score = FOCUS_LINE_SCORE;
-                    selected.insert(boosted);
+                    boosted.score = line.score.max(FOCUS_LINE_SCORE);
+                    selected.replace(boosted);
                 }
             }
         }

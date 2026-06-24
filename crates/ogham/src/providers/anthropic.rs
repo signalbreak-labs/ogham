@@ -218,15 +218,37 @@ fn render_image_source(source: &ImageSource) -> Value {
 
 /// Minimum input tokens before Anthropic prompt caching engages for `model`.
 ///
-/// Anthropic requires a longer minimum cacheable prefix for Haiku models
-/// (2048 tokens) than for Opus/Sonnet (1024). Matching is by substring on a
-/// lowercased model id, with the Opus/Sonnet value as the conservative default.
+/// Anthropic's minimum cacheable prompt length is **versioned, not per-family** —
+/// e.g. Haiku 4.5 needs 4096 while Sonnet 4.6 needs 1024, and Opus ranges from
+/// 1024 (4.8) to 4096 (4.5/4.6). This table reflects the documented values as of
+/// 2026-06 (Anthropic prompt-caching docs); the values change with new model
+/// releases, so re-verify for a model not listed here. Matching is by substring
+/// on a lowercased model id; unknown models fall back to 1024, the most common
+/// current minimum.
 pub fn min_cacheable_prefix_tokens(model: &str) -> usize {
-    if model.to_ascii_lowercase().contains("haiku") {
-        2048
-    } else {
-        1024
+    let m = model.to_ascii_lowercase();
+    // Most specific / current first; each key is a distinct version token.
+    const TABLE: &[(&str, usize)] = &[
+        ("fable-5", 512),
+        ("mythos-preview", 2048),
+        ("mythos-5", 512),
+        ("opus-4-8", 1024),
+        ("opus-4-7", 2048),
+        ("opus-4-6", 4096),
+        ("opus-4-5", 4096),
+        ("opus-4-1", 1024),
+        ("sonnet-4-6", 1024),
+        ("sonnet-4-5", 1024),
+        ("haiku-4-5", 4096),
+        ("haiku-3-5", 2048),
+        ("3-5-haiku", 2048), // legacy id ordering (claude-3-5-haiku-…)
+    ];
+    for (key, min) in TABLE {
+        if m.contains(key) {
+            return *min;
+        }
     }
+    1024
 }
 
 #[cfg(test)]
@@ -468,8 +490,14 @@ mod tests {
 
     #[test]
     fn per_model_cache_thresholds() {
-        assert_eq!(min_cacheable_prefix_tokens("claude-haiku-4-5"), 2048);
+        // Documented Anthropic minimum cacheable prompt lengths (2026-06).
+        assert_eq!(min_cacheable_prefix_tokens("claude-haiku-4-5"), 4096);
         assert_eq!(min_cacheable_prefix_tokens("claude-opus-4-8"), 1024);
+        assert_eq!(min_cacheable_prefix_tokens("claude-opus-4-7"), 2048);
+        assert_eq!(min_cacheable_prefix_tokens("claude-opus-4-5"), 4096);
         assert_eq!(min_cacheable_prefix_tokens("claude-sonnet-4-6"), 1024);
+        assert_eq!(min_cacheable_prefix_tokens("claude-fable-5"), 512);
+        // Unknown model falls back to the most common current minimum.
+        assert_eq!(min_cacheable_prefix_tokens("some-future-model"), 1024);
     }
 }
