@@ -29,7 +29,7 @@ use crate::budget::ContextBudget;
 use crate::ccr::referenced_ccr_ids;
 use crate::compact::{
     CachePlan, CachePolicy, CcrPolicy, CompactConfig, CompressionPolicy, FoldRecord,
-    compact_conversation,
+    apply_cache_policy, compact_conversation,
 };
 use crate::token_counter::counter_for_model;
 use ogham_core::{Message, Result, meta_keys};
@@ -85,7 +85,7 @@ pub struct SessionStep {
     pub tokens: usize,
     /// Provider cache plan for the compacted output (finalized region is stable).
     pub cache_plan: CachePlan,
-    /// CCR ids garbage-collected this step (evicted, unreferenced originals).
+    /// CCR ids successfully garbage-collected this step.
     pub evicted: Vec<String>,
 }
 
@@ -157,7 +157,7 @@ impl ContextSession {
         }
 
         let result = compact_conversation(working, self.compact_config()).await?;
-        self.messages = result.messages;
+        let mut next_messages = result.messages;
 
         // Mark this turn's fold replacements finalized. Finalized messages are
         // pinned and never reprocessed, so `result.folds` is exactly this turn's
@@ -166,21 +166,31 @@ impl ContextSession {
         uniquify_fold_ids(&self.folds, &mut new_folds);
         for fold in &new_folds {
             if let Some(idx) = fold.replacement_index
-                && let Some(msg) = self.messages.get_mut(idx)
+                && let Some(msg) = next_messages.get_mut(idx)
             {
                 mark_finalized(msg);
             }
         }
-        self.folds.extend(new_folds.iter().cloned());
 
-        let evicted = self.apply_retention().await?;
+        let evicted = self.apply_retention(&mut next_messages).await;
 
         let counter = counter_for_model(self.config.model.as_deref().unwrap_or("default"));
-        let tokens = counter.count_messages(&self.messages);
+        let mut warnings = Vec::new();
+        let cache_plan = apply_cache_policy(
+            &mut next_messages,
+            self.config.cache,
+            counter.as_ref(),
+            &mut warnings,
+        );
+        let tokens = counter.count_messages(&next_messages);
+
+        self.messages = next_messages;
+        self.folds.extend(new_folds.iter().cloned());
+
         Ok(SessionStep {
             new_folds,
             tokens,
-            cache_plan: result.cache_plan,
+            cache_plan,
             evicted,
         })
     }
@@ -188,25 +198,24 @@ impl ContextSession {
     /// Bound finalized-stub growth per the retention policy. Evicts the oldest
     /// finalized stubs beyond the cap from the prompt and, when configured,
     /// garbage-collects their CCR originals — but never an original a remaining
-    /// live marker still references. Returns the deleted CCR ids.
-    async fn apply_retention(&mut self) -> Result<Vec<String>> {
+    /// live marker still references. Returns the successfully deleted CCR ids.
+    async fn apply_retention(&self, messages: &mut Vec<Message>) -> Vec<String> {
         let RetentionPolicy::EvictFinalized {
             max_finalized,
             evict_originals,
         } = self.config.retention
         else {
-            return Ok(Vec::new());
+            return Vec::new();
         };
 
-        let finalized: Vec<usize> = self
-            .messages
+        let finalized: Vec<usize> = messages
             .iter()
             .enumerate()
             .filter(|(_, m)| is_finalized(m))
             .map(|(i, _)| i)
             .collect();
         if finalized.len() <= max_finalized {
-            return Ok(Vec::new());
+            return Vec::new();
         }
 
         // Evict the oldest (lowest-index) finalized stubs beyond the cap.
@@ -214,32 +223,36 @@ impl ContextSession {
         let to_remove: BTreeSet<usize> = finalized.into_iter().take(evict_count).collect();
 
         let mut removed = Vec::with_capacity(to_remove.len());
-        let mut kept = Vec::with_capacity(self.messages.len() - to_remove.len());
-        for (i, msg) in std::mem::take(&mut self.messages).into_iter().enumerate() {
+        let mut kept = Vec::with_capacity(messages.len() - to_remove.len());
+        for (i, msg) in std::mem::take(messages).into_iter().enumerate() {
             if to_remove.contains(&i) {
                 removed.push(msg);
             } else {
                 kept.push(msg);
             }
         }
-        self.messages = kept;
+        *messages = kept;
 
         if !evict_originals {
-            return Ok(Vec::new());
+            return Vec::new();
         }
         let CcrPolicy::Store(store) = &self.config.ccr else {
-            return Ok(Vec::new());
+            return Vec::new();
         };
         // Delete a removed stub's original only if nothing still references it.
-        let still_referenced = referenced_ccr_ids(&self.messages);
+        let still_referenced = referenced_ccr_ids(messages);
         let mut evicted = Vec::new();
         for id in referenced_ccr_ids(&removed) {
             if !still_referenced.contains(&id) {
-                store.delete(&id).await?;
-                evicted.push(id);
+                match store.delete(&id).await {
+                    Ok(()) => evicted.push(id),
+                    Err(err) => {
+                        tracing::warn!(ccr_id = %id, error = %err, "session_ccr_gc_failed");
+                    }
+                }
             }
         }
-        Ok(evicted)
+        evicted
     }
 
     /// Retrieve a CCR original by id (delegates to the configured store).
@@ -301,6 +314,7 @@ mod tests {
     use crate::ccr::CcrStore;
     use crate::ccr::in_memory::InMemoryCcrStore;
     use crate::compact::FoldKind;
+    use async_trait::async_trait;
     use std::sync::Arc;
 
     fn tool_msg(name: &str, content: impl Into<String>) -> Message {
@@ -337,6 +351,35 @@ mod tests {
             ccr: CcrPolicy::Store(store),
             ..Default::default()
         })
+    }
+
+    struct DeleteFailsStore {
+        inner: InMemoryCcrStore,
+    }
+
+    impl DeleteFailsStore {
+        fn new() -> Self {
+            Self {
+                inner: InMemoryCcrStore::unbounded(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl CcrStore for DeleteFailsStore {
+        async fn save(&self, id: &str, original: &str, metadata: Option<&str>) -> Result<()> {
+            self.inner.save(id, original, metadata).await
+        }
+
+        async fn retrieve(&self, id: &str) -> Result<Option<String>> {
+            self.inner.retrieve(id).await
+        }
+
+        async fn delete(&self, id: &str) -> Result<()> {
+            Err(ogham_core::OghamError::StoreError(format!(
+                "delete failed for {id}"
+            )))
+        }
     }
 
     #[tokio::test]
@@ -584,5 +627,90 @@ mod tests {
             let id = fold.ccr_id.as_ref().unwrap();
             assert!(s.retrieve(id).await.unwrap().is_some());
         }
+    }
+
+    #[tokio::test]
+    async fn retention_recomputes_cache_plan_after_stub_eviction() {
+        let store: Arc<dyn CcrStore> = Arc::new(InMemoryCcrStore::unbounded());
+        let mut s = ContextSession::new(SessionConfig {
+            budget: Some(ContextBudget {
+                total_limit: 220,
+                safety_margin: Some(0.0),
+            }),
+            agent_policy: AgentPolicy {
+                keep_recent_tool_results: 0,
+                clear_old_tool_results: true,
+                keep_recent_assistant: 1,
+                protected_tail_tokens: None,
+            },
+            ccr: CcrPolicy::Store(store),
+            cache: CachePolicy::OpenAi {
+                stable_suffix_messages: 1,
+            },
+            retention: RetentionPolicy::EvictFinalized {
+                max_finalized: 0,
+                evict_originals: false,
+            },
+            ..Default::default()
+        });
+
+        s.push(Message::new("system", "sys"));
+        s.push(tool_msg("shell", big_output(99)));
+        s.push(Message::new("user", "latest"));
+
+        let step = s.compact().await.unwrap();
+
+        assert_eq!(s.messages().iter().filter(|m| is_finalized(m)).count(), 0);
+        assert_eq!(step.cache_plan.policy, "openai");
+        assert_eq!(
+            step.cache_plan.stable_prefix_messages,
+            s.messages().len().saturating_sub(1),
+            "cache plan must describe the post-retention message list"
+        );
+    }
+
+    #[tokio::test]
+    async fn retention_delete_failure_does_not_fail_compaction() {
+        let store: Arc<dyn CcrStore> = Arc::new(DeleteFailsStore::new());
+        let mut s = ContextSession::new(SessionConfig {
+            budget: Some(ContextBudget {
+                total_limit: 220,
+                safety_margin: Some(0.0),
+            }),
+            agent_policy: AgentPolicy {
+                keep_recent_tool_results: 0,
+                clear_old_tool_results: true,
+                keep_recent_assistant: 1,
+                protected_tail_tokens: None,
+            },
+            ccr: CcrPolicy::Store(store),
+            retention: RetentionPolicy::EvictFinalized {
+                max_finalized: 0,
+                evict_originals: true,
+            },
+            ..Default::default()
+        });
+
+        s.push(Message::new("system", "sys"));
+        s.push(tool_msg("shell", big_output(100)));
+        s.push(Message::new("user", "latest"));
+
+        let step = s.compact().await.unwrap();
+
+        assert!(
+            step.evicted.is_empty(),
+            "failed deletes must not be reported as evictions"
+        );
+        assert_eq!(s.messages().iter().filter(|m| is_finalized(m)).count(), 0);
+        let id = s
+            .folds()
+            .iter()
+            .find(|f| f.kind == FoldKind::Cleared)
+            .and_then(|f| f.ccr_id.as_ref())
+            .expect("cleared fold must retain its ccr id");
+        assert!(
+            s.retrieve(id).await.unwrap().is_some(),
+            "failed GC leaves the original available"
+        );
     }
 }
