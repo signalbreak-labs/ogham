@@ -116,10 +116,11 @@ The safety and honesty foundation is in place:
 - **Provider cache planning.** Shipped: OpenAI stable-prefix reports
   (`providers::openai`), Gemini cache candidates (`providers::gemini`), an
   Anthropic `cache_control` request renderer (`providers::anthropic`), and
-  stable-prefix accounting folded into `CompactResult`'s `CachePlan`. Remaining:
-  richer Anthropic rendering of tool-result / image blocks (depends on the rich
-  content model), and per-model cache thresholds. Ogham emits plans — hosts own
-  the HTTP calls and auth.
+  stable-prefix accounting folded into `CompactResult`'s `CachePlan`.
+  `render_cache_control_rich` now renders native Anthropic tool-use /
+  tool-result / image blocks from the rich content model (no flattening), and
+  `min_cacheable_prefix_tokens(model)` gives per-model Anthropic cache
+  thresholds. Ogham emits plans — hosts own the HTTP calls and auth.
 - **Token-counter reporting.** Done. `TokenCountKind` distinguishes `Exact`,
   `Estimated { method, safety_margin }`, and `ProviderReported`; `count_kind()`
   reports it per counter; `BudgetReport` surfaces the count kind and applied

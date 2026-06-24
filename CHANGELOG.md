@@ -9,6 +9,16 @@ versions may contain breaking changes).
 
 ### Added
 
+- Richer Anthropic rendering: `providers::anthropic::render_cache_control_rich`
+  renders block-structured `RichMessage`s into native Anthropic content blocks
+  — `text`, `tool_use`, `tool_result` (with nested content rendered
+  recursively), and `image` (base64/url source) — instead of flattening to
+  text. Tool results land in a `user` turn (per the Messages API); `system`
+  splits to the top-level field; `cache_control` breakpoints land on a
+  message's last block. `Thinking`/`Reference` blocks (no native input shape)
+  render as text so their content still reaches the model. Adds
+  `min_cacheable_prefix_tokens(model)` for per-model Anthropic cache thresholds
+  (2048 for Haiku, 1024 otherwise).
 - Focus-hint steering across all built-in compressors. Previously only
   `SmartCrusher` consumed `CompactConfig.focus`; now `LogStripper`,
   `AstCodeCompressor`, and `SemanticCompressor` do too, via the shared

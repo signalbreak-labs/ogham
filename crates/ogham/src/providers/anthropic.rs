@@ -11,7 +11,7 @@
 //! (exposed as [`BETA_HEADER`]).
 
 use crate::agent::AgentPolicy;
-use ogham_core::{Message, meta_keys};
+use ogham_core::{ContentBlock, ImageSource, Message, MessageContent, RichMessage, meta_keys};
 use serde_json::{Value, json};
 
 /// Value for the `anthropic-beta` request header that enables context editing.
@@ -83,10 +83,10 @@ impl AnthropicContextEditing {
 /// the content block of any message annotated by
 /// [`crate::cache_strategy::apply_cache_strategy`].
 ///
-/// This renders plain-text content only: a non-system role other than
-/// `assistant` is normalized to `user` (valid Anthropic roles), and tool-result
-/// / image / other rich blocks are flattened to text until the host-neutral
-/// rich content model lands.
+/// [`render_cache_control`] renders plain-text content only: a non-system role
+/// other than `assistant` is normalized to `user` (valid Anthropic roles).
+/// To preserve native tool-use / tool-result / image blocks, render
+/// [`RichMessage`]s with [`render_cache_control_rich`] instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnthropicMessages {
     /// The `system` request field as an array of content blocks (possibly empty).
@@ -119,6 +119,113 @@ pub fn render_cache_control(messages: &[Message]) -> AnthropicMessages {
     AnthropicMessages {
         system,
         messages: turns,
+    }
+}
+
+/// Render block-structured [`RichMessage`]s into [`AnthropicMessages`],
+/// preserving native Anthropic content blocks instead of flattening to text.
+///
+/// Each [`ContentBlock`] maps to its Anthropic shape: text → `text`, tool calls
+/// → `tool_use`, tool results → `tool_result` (with nested content rendered
+/// recursively), images → `image` (base64 or url source). Two blocks have no
+/// native Anthropic input shape and are rendered as `text` so their content
+/// still reaches the model: `Thinking` (a replayable `thinking` block requires
+/// the original provider signature, which the host-neutral model does not
+/// carry) and `Reference` (rendered as `[kind: id_or_path]`).
+///
+/// Roles follow the Messages API: `system` messages become top-level `system`
+/// blocks; `assistant` stays `assistant`; every other role (including `tool`)
+/// becomes a `user` turn, which is where Anthropic expects `tool_result` blocks.
+/// When a message carries the `cache_control` annotation, the breakpoint is
+/// placed on its **last** block (so the whole message is within the cached
+/// prefix). Messages that render to no blocks are skipped.
+pub fn render_cache_control_rich(messages: &[RichMessage]) -> AnthropicMessages {
+    let mut system = Vec::new();
+    let mut turns = Vec::new();
+    for m in messages {
+        let mut blocks = render_message_content(&m.content);
+        if blocks.is_empty() {
+            continue;
+        }
+        if m.metadata.contains_key(meta_keys::CACHE_CONTROL)
+            && let Some(last) = blocks.last_mut()
+        {
+            last["cache_control"] = json!({ "type": "ephemeral" });
+        }
+        if m.role == "system" {
+            system.extend(blocks);
+        } else {
+            let role = if m.role == "assistant" {
+                "assistant"
+            } else {
+                "user"
+            };
+            turns.push(json!({ "role": role, "content": blocks }));
+        }
+    }
+    AnthropicMessages {
+        system,
+        messages: turns,
+    }
+}
+
+fn render_message_content(content: &MessageContent) -> Vec<Value> {
+    match content {
+        MessageContent::Text(text) => vec![json!({ "type": "text", "text": text })],
+        MessageContent::Blocks(blocks) => blocks.iter().map(render_block).collect(),
+    }
+}
+
+fn render_block(block: &ContentBlock) -> Value {
+    match block {
+        ContentBlock::Text { text } => json!({ "type": "text", "text": text }),
+        // No provider signature is available to replay a real `thinking` block,
+        // so the reasoning text is preserved as a plain text block.
+        ContentBlock::Thinking { text } => json!({ "type": "text", "text": text }),
+        ContentBlock::Image { source, .. } => {
+            json!({ "type": "image", "source": render_image_source(source) })
+        }
+        ContentBlock::ToolUse { id, name, input } => {
+            json!({ "type": "tool_use", "id": id, "name": name, "input": input })
+        }
+        ContentBlock::ToolResult {
+            tool_use_id,
+            is_error,
+            content,
+        } => {
+            let nested: Vec<Value> = content.iter().map(render_block).collect();
+            json!({
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "is_error": is_error,
+                "content": nested,
+            })
+        }
+        ContentBlock::Reference {
+            kind, id_or_path, ..
+        } => json!({ "type": "text", "text": format!("[{kind}: {id_or_path}]") }),
+    }
+}
+
+fn render_image_source(source: &ImageSource) -> Value {
+    match source {
+        ImageSource::Base64 { media_type, data } => {
+            json!({ "type": "base64", "media_type": media_type, "data": data })
+        }
+        ImageSource::Url { url } => json!({ "type": "url", "url": url }),
+    }
+}
+
+/// Minimum input tokens before Anthropic prompt caching engages for `model`.
+///
+/// Anthropic requires a longer minimum cacheable prefix for Haiku models
+/// (2048 tokens) than for Opus/Sonnet (1024). Matching is by substring on a
+/// lowercased model id, with the Opus/Sonnet value as the conservative default.
+pub fn min_cacheable_prefix_tokens(model: &str) -> usize {
+    if model.to_ascii_lowercase().contains("haiku") {
+        2048
+    } else {
+        1024
     }
 }
 
@@ -212,5 +319,157 @@ mod tests {
                 .get("cache_control")
                 .is_none()
         );
+    }
+
+    // ─── Rich block rendering ────────────────────────────────────────────
+
+    #[test]
+    fn rich_renders_tool_use_and_tool_result_natively() {
+        let assistant = RichMessage::blocks(
+            "assistant",
+            vec![
+                ContentBlock::Text {
+                    text: "let me check".into(),
+                },
+                ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "shell".into(),
+                    input: json!({ "cmd": "ls" }),
+                },
+            ],
+        );
+        let tool = RichMessage::blocks(
+            "tool",
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".into(),
+                is_error: false,
+                content: vec![ContentBlock::Text {
+                    text: "a.txt b.txt".into(),
+                }],
+            }],
+        );
+
+        let rendered = render_cache_control_rich(&[assistant, tool]);
+        assert!(rendered.system.is_empty());
+        assert_eq!(rendered.messages.len(), 2);
+
+        // Assistant turn keeps text + tool_use.
+        assert_eq!(rendered.messages[0]["role"], "assistant");
+        assert_eq!(rendered.messages[0]["content"][0]["type"], "text");
+        assert_eq!(rendered.messages[0]["content"][1]["type"], "tool_use");
+        assert_eq!(rendered.messages[0]["content"][1]["id"], "call_1");
+        assert_eq!(rendered.messages[0]["content"][1]["name"], "shell");
+        assert_eq!(rendered.messages[0]["content"][1]["input"]["cmd"], "ls");
+
+        // Tool result lands in a USER turn as a tool_result block.
+        assert_eq!(rendered.messages[1]["role"], "user");
+        let tr = &rendered.messages[1]["content"][0];
+        assert_eq!(tr["type"], "tool_result");
+        assert_eq!(tr["tool_use_id"], "call_1");
+        assert_eq!(tr["is_error"], false);
+        assert_eq!(tr["content"][0]["type"], "text");
+        assert_eq!(tr["content"][0]["text"], "a.txt b.txt");
+    }
+
+    #[test]
+    fn rich_renders_image_sources() {
+        let base64 = RichMessage::blocks(
+            "user",
+            vec![ContentBlock::Image {
+                source: ImageSource::Base64 {
+                    media_type: "image/png".into(),
+                    data: "AAAA".into(),
+                },
+                alt: Some("ignored by anthropic".into()),
+            }],
+        );
+        let url = RichMessage::blocks(
+            "user",
+            vec![ContentBlock::Image {
+                source: ImageSource::Url {
+                    url: "https://example.com/x.png".into(),
+                },
+                alt: None,
+            }],
+        );
+        let rendered = render_cache_control_rich(&[base64, url]);
+
+        let img0 = &rendered.messages[0]["content"][0];
+        assert_eq!(img0["type"], "image");
+        assert_eq!(img0["source"]["type"], "base64");
+        assert_eq!(img0["source"]["media_type"], "image/png");
+        assert_eq!(img0["source"]["data"], "AAAA");
+
+        let img1 = &rendered.messages[1]["content"][0];
+        assert_eq!(img1["source"]["type"], "url");
+        assert_eq!(img1["source"]["url"], "https://example.com/x.png");
+    }
+
+    #[test]
+    fn rich_cache_control_lands_on_last_block() {
+        let mut m = RichMessage::blocks(
+            "user",
+            vec![
+                ContentBlock::Text { text: "a".into() },
+                ContentBlock::Text { text: "b".into() },
+            ],
+        );
+        m.metadata.insert(
+            meta_keys::CACHE_CONTROL.to_string(),
+            "ephemeral".to_string(),
+        );
+        let rendered = render_cache_control_rich(&[m]);
+        let content = &rendered.messages[0]["content"];
+        assert!(content[0].get("cache_control").is_none());
+        assert_eq!(content[1]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn rich_splits_system_and_renders_reference_and_thinking_as_text() {
+        let system = RichMessage::text("system", "be helpful");
+        let assistant = RichMessage::blocks(
+            "assistant",
+            vec![
+                ContentBlock::Thinking { text: "hmm".into() },
+                ContentBlock::Reference {
+                    kind: "file".into(),
+                    id_or_path: "src/main.rs".into(),
+                    metadata: Default::default(),
+                },
+            ],
+        );
+        let rendered = render_cache_control_rich(&[system, assistant]);
+        assert_eq!(rendered.system.len(), 1);
+        assert_eq!(rendered.system[0]["text"], "be helpful");
+        // Thinking + reference both become text blocks.
+        assert_eq!(rendered.messages[0]["content"][0]["type"], "text");
+        assert_eq!(rendered.messages[0]["content"][0]["text"], "hmm");
+        assert_eq!(rendered.messages[0]["content"][1]["type"], "text");
+        assert_eq!(
+            rendered.messages[0]["content"][1]["text"],
+            "[file: src/main.rs]"
+        );
+    }
+
+    #[test]
+    fn rich_render_is_deterministic() {
+        let m = RichMessage::blocks(
+            "assistant",
+            vec![ContentBlock::ToolUse {
+                id: "c".into(),
+                name: "t".into(),
+                input: json!({ "k": "v" }),
+            }],
+        );
+        let a = render_cache_control_rich(std::slice::from_ref(&m));
+        let b = render_cache_control_rich(&[m]);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn per_model_cache_thresholds() {
+        assert_eq!(min_cacheable_prefix_tokens("claude-haiku-4-5"), 2048);
+        assert_eq!(min_cacheable_prefix_tokens("claude-opus-4-8"), 1024);
+        assert_eq!(min_cacheable_prefix_tokens("claude-sonnet-4-6"), 1024);
     }
 }
