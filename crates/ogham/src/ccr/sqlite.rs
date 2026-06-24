@@ -1,10 +1,21 @@
 use super::{CcrPayload, CcrStore};
 use async_trait::async_trait;
-use ogham_core::Result;
+use ogham_core::{OghamError, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Run an `ALTER TABLE ... ADD COLUMN` migration, treating only the benign
+/// "column already exists" case (a re-open of an already-migrated DB) as success
+/// and surfacing any other failure so a genuinely failed migration is not hidden.
+fn add_column_if_missing(conn: &Connection, alter_sql: &str) -> rusqlite::Result<()> {
+    match conn.execute(alter_sql, []) {
+        Ok(_) => Ok(()),
+        Err(e) if e.to_string().contains("duplicate column name") => Ok(()),
+        Err(e) => Err(e),
+    }
+}
 
 /// SQLite-backed CCR store.
 pub struct SqliteCcrStore {
@@ -31,10 +42,10 @@ impl SqliteCcrStore {
         // Native typed-payload columns. Added by migration so a database created
         // before payload support gains them; the `original` BLOB then holds raw
         // payload bytes (no hex envelope). NULL `media_type` marks a plain text
-        // `save` (or a legacy envelope), which retrieves via the text decoder.
-        // Errors here are the benign "duplicate column name" on re-open.
-        let _ = conn.execute("ALTER TABLE ccr_entries ADD COLUMN media_type TEXT", []);
-        let _ = conn.execute("ALTER TABLE ccr_entries ADD COLUMN metadata TEXT", []);
+        // `save` (or a legacy envelope), which retrieves via the text decoder. A
+        // real migration failure surfaces; only "column exists" on re-open is ok.
+        add_column_if_missing(&conn, "ALTER TABLE ccr_entries ADD COLUMN media_type TEXT")?;
+        add_column_if_missing(&conn, "ALTER TABLE ccr_entries ADD COLUMN metadata TEXT")?;
         Ok(Self {
             conn: Mutex::new(conn),
             default_ttl_seconds,
@@ -55,7 +66,7 @@ impl CcrStore for SqliteCcrStore {
     async fn save(&self, id: &str, original: &str, _metadata: Option<&str>) -> Result<()> {
         let now = Self::now_unix_seconds();
         let conn = self.conn.lock().unwrap();
-        let res = conn.execute(
+        conn.execute(
             "INSERT INTO ccr_entries (hash, original, media_type, metadata, created_at, ttl_seconds)
              VALUES (?1, ?2, NULL, NULL, ?3, ?4)
              ON CONFLICT(hash) DO UPDATE SET
@@ -70,10 +81,12 @@ impl CcrStore for SqliteCcrStore {
                 now as i64,
                 self.default_ttl_seconds as i64
             ],
-        );
-        if let Err(err) = res {
+        )
+        .map_err(|err| {
+            // Fail closed: a marker must never be emitted for an unstored original.
             tracing::warn!(hash = %id, error = %err, "ccr_sqlite_save_failed");
-        }
+            OghamError::StoreError(err.to_string())
+        })?;
         Ok(())
     }
 
@@ -112,7 +125,7 @@ impl CcrStore for SqliteCcrStore {
         let metadata_json =
             serde_json::to_string(&payload.metadata).unwrap_or_else(|_| "{}".to_string());
         let conn = self.conn.lock().unwrap();
-        let res = conn.execute(
+        conn.execute(
             "INSERT INTO ccr_entries (hash, original, media_type, metadata, created_at, ttl_seconds)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(hash) DO UPDATE SET
@@ -129,10 +142,13 @@ impl CcrStore for SqliteCcrStore {
                 now as i64,
                 self.default_ttl_seconds as i64
             ],
-        );
-        if let Err(err) = res {
+        )
+        .map_err(|err| {
+            // Fail closed: the rich path keeps the original uncompressed if the
+            // payload save errors, so it must not be swallowed as Ok.
             tracing::warn!(hash = %id, error = %err, "ccr_sqlite_save_payload_failed");
-        }
+            OghamError::StoreError(err.to_string())
+        })?;
         Ok(())
     }
 
@@ -236,6 +252,17 @@ mod tests {
         let payload = store.retrieve_payload("p").await.unwrap().unwrap();
         assert_eq!(payload.bytes, b"just text");
         assert!(payload.media_type.starts_with("text/plain"));
+    }
+
+    #[test]
+    fn migration_helper_classifies_errors() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)", []).unwrap();
+        // First add succeeds; re-adding the same column is the benign duplicate.
+        add_column_if_missing(&conn, "ALTER TABLE t ADD COLUMN b TEXT").unwrap();
+        add_column_if_missing(&conn, "ALTER TABLE t ADD COLUMN b TEXT").unwrap();
+        // A genuinely failing migration (no such table) must surface, not be hidden.
+        assert!(add_column_if_missing(&conn, "ALTER TABLE missing ADD COLUMN c TEXT").is_err());
     }
 
     #[tokio::test]

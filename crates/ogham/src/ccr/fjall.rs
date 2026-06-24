@@ -42,10 +42,28 @@ fn read_chunk<'a>(rest: &'a [u8], pos: &mut usize) -> Option<&'a [u8]> {
     Some(chunk)
 }
 
-/// Decode a native frame, or `None` if `bytes` is not framed (a plain `save`
-/// value or a legacy text envelope).
-fn decode_native(bytes: &[u8]) -> Option<CcrPayload> {
-    let rest = bytes.strip_prefix(PAYLOAD_MAGIC)?;
+/// Outcome of inspecting a stored value: not a native frame, a decoded payload,
+/// or a value that carries the native magic but is corrupt. The three states are
+/// distinct so a corrupt native payload fails closed instead of silently
+/// degrading to lossy text (CCR restore must be exact).
+enum FrameDecode {
+    NotFramed,
+    Payload(CcrPayload),
+    Malformed,
+}
+
+fn decode_native(bytes: &[u8]) -> FrameDecode {
+    let Some(rest) = bytes.strip_prefix(PAYLOAD_MAGIC) else {
+        return FrameDecode::NotFramed;
+    };
+    // The magic is present: it is a native frame and must parse exactly.
+    match parse_frame(rest) {
+        Some(payload) => FrameDecode::Payload(payload),
+        None => FrameDecode::Malformed,
+    }
+}
+
+fn parse_frame(rest: &[u8]) -> Option<CcrPayload> {
     let mut pos = 0usize;
     let media_type = std::str::from_utf8(read_chunk(rest, &mut pos)?)
         .ok()?
@@ -58,6 +76,10 @@ fn decode_native(bytes: &[u8]) -> Option<CcrPayload> {
         bytes: payload_bytes,
         metadata,
     })
+}
+
+fn corrupt_frame_err(id: &str) -> ogham_core::OghamError {
+    ogham_core::OghamError::StoreError(format!("corrupt CCR payload frame for id {id}"))
 }
 
 /// CCR store backed by fjall LSM-tree.
@@ -109,15 +131,16 @@ impl CcrStore for FjallCcrStore {
 
     async fn retrieve(&self, id: &str) -> Result<Option<String>> {
         match self.partition.get(id) {
-            Ok(Some(bytes)) => {
-                // A natively-framed payload yields its content as text (lossless
-                // for text payloads); a plain value is returned as-is.
-                let text = match decode_native(&bytes) {
-                    Some(payload) => String::from_utf8(payload.bytes).unwrap_or_default(),
-                    None => String::from_utf8(bytes.to_vec()).unwrap_or_default(),
-                };
-                Ok(Some(text))
-            }
+            Ok(Some(bytes)) => match decode_native(&bytes) {
+                // A framed text payload yields its content; a plain value is as-is.
+                FrameDecode::Payload(payload) => {
+                    Ok(Some(String::from_utf8(payload.bytes).unwrap_or_default()))
+                }
+                FrameDecode::NotFramed => {
+                    Ok(Some(String::from_utf8(bytes.to_vec()).unwrap_or_default()))
+                }
+                FrameDecode::Malformed => Err(corrupt_frame_err(id)),
+            },
             Ok(None) => Ok(None),
             Err(e) => Err(ogham_core::OghamError::StoreError(e.to_string())),
         }
@@ -144,11 +167,15 @@ impl CcrStore for FjallCcrStore {
 
     async fn retrieve_payload(&self, id: &str) -> Result<Option<CcrPayload>> {
         match self.partition.get(id) {
-            Ok(Some(bytes)) => Ok(Some(match decode_native(&bytes) {
-                Some(payload) => payload,
+            Ok(Some(bytes)) => match decode_native(&bytes) {
+                FrameDecode::Payload(payload) => Ok(Some(payload)),
                 // A plain `save` value or a legacy text envelope.
-                None => super::decode_payload(&String::from_utf8_lossy(&bytes)),
-            })),
+                FrameDecode::NotFramed => Ok(Some(super::decode_payload(
+                    &String::from_utf8_lossy(&bytes),
+                ))),
+                // Magic present but corrupt: fail closed rather than restore lossily.
+                FrameDecode::Malformed => Err(corrupt_frame_err(id)),
+            },
             Ok(None) => Ok(None),
             Err(e) => Err(ogham_core::OghamError::StoreError(e.to_string())),
         }
@@ -177,18 +204,37 @@ mod tests {
     }
 
     #[test]
-    fn native_frame_round_trips_and_rejects_non_frames() {
+    fn native_frame_classifies_payload_plain_and_malformed() {
         let payload = CcrPayload {
             media_type: "application/octet-stream".to_string(),
             bytes: vec![0xff, 0x00, 0x80, 0x01],
             metadata: HashMap::from([("k".to_string(), "v".to_string())]),
         };
         let framed = encode_native(&payload);
-        assert_eq!(decode_native(&framed), Some(payload));
+        assert!(matches!(decode_native(&framed), FrameDecode::Payload(p) if p == payload));
         // Plain text is not a frame.
-        assert_eq!(decode_native(b"just text"), None);
-        // A truncated frame must not panic.
-        assert_eq!(decode_native(&framed[..PAYLOAD_MAGIC.len() + 2]), None);
+        assert!(matches!(
+            decode_native(b"just text"),
+            FrameDecode::NotFramed
+        ));
+        // Magic present but truncated: malformed, not silently treated as plain.
+        assert!(matches!(
+            decode_native(&framed[..PAYLOAD_MAGIC.len() + 2]),
+            FrameDecode::Malformed
+        ));
+    }
+
+    #[tokio::test]
+    async fn corrupt_native_frame_fails_closed() {
+        let dir = TempDir::new();
+        let store = FjallCcrStore::new(&dir.0).unwrap();
+        // Inject a value with the magic prefix but a bogus (oversized) length.
+        let mut bad = PAYLOAD_MAGIC.to_vec();
+        bad.extend_from_slice(&u32::MAX.to_le_bytes());
+        store.partition.insert("x", bad).unwrap();
+        // Both APIs must error rather than silently restore lossy/wrong content.
+        assert!(store.retrieve_payload("x").await.is_err());
+        assert!(store.retrieve("x").await.is_err());
     }
 
     #[tokio::test]
