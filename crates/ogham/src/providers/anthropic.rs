@@ -138,6 +138,9 @@ pub fn render_cache_control(messages: &[Message]) -> AnthropicMessages {
 /// Roles follow the Messages API: `system` messages become top-level `system`
 /// blocks; `assistant` stays `assistant`; every other role (including `tool`)
 /// becomes a `user` turn, which is where Anthropic expects `tool_result` blocks.
+/// Block placement is enforced for the resolved role — a `tool_use` outside an
+/// assistant turn or a `tool_result` outside a user turn is linearized to text —
+/// so a mislabeled message can never produce a provider-invalid request.
 /// When a message carries the `cache_control` annotation, the breakpoint is
 /// placed on its **last** block (so the whole message is within the cached
 /// prefix). Messages that render to no blocks are skipped.
@@ -145,7 +148,16 @@ pub fn render_cache_control_rich(messages: &[RichMessage]) -> AnthropicMessages 
     let mut system = Vec::new();
     let mut turns = Vec::new();
     for m in messages {
-        let mut blocks = render_message_content(&m.content);
+        // Anthropic role: system goes to the top-level field; assistant stays
+        // assistant; everything else (incl. `tool`) is a user turn. Blocks are
+        // then rendered for that role so a misplaced `tool_use`/`tool_result`
+        // can't produce a provider-invalid turn.
+        let role = match m.role.as_str() {
+            "system" => "system",
+            "assistant" => "assistant",
+            _ => "user",
+        };
+        let mut blocks = render_message_content(&m.content, role);
         if blocks.is_empty() {
             continue;
         }
@@ -154,14 +166,9 @@ pub fn render_cache_control_rich(messages: &[RichMessage]) -> AnthropicMessages 
         {
             last["cache_control"] = json!({ "type": "ephemeral" });
         }
-        if m.role == "system" {
+        if role == "system" {
             system.extend(blocks);
         } else {
-            let role = if m.role == "assistant" {
-                "assistant"
-            } else {
-                "user"
-            };
             turns.push(json!({ "role": role, "content": blocks }));
         }
     }
@@ -171,10 +178,29 @@ pub fn render_cache_control_rich(messages: &[RichMessage]) -> AnthropicMessages 
     }
 }
 
-fn render_message_content(content: &MessageContent) -> Vec<Value> {
+fn render_message_content(content: &MessageContent, role: &str) -> Vec<Value> {
     match content {
         MessageContent::Text(text) => vec![json!({ "type": "text", "text": text })],
-        MessageContent::Blocks(blocks) => blocks.iter().map(render_block).collect(),
+        MessageContent::Blocks(blocks) => blocks
+            .iter()
+            .map(|b| render_block_in_role(b, role))
+            .collect(),
+    }
+}
+
+/// Render a top-level block, enforcing Anthropic's role rules: `tool_use` is
+/// valid only in an assistant turn and `tool_result` only in a user turn. A
+/// block that is invalid for `role` is linearized to a `text` block so the
+/// request stays valid regardless of how the host labeled the message.
+fn render_block_in_role(block: &ContentBlock, role: &str) -> Value {
+    match block {
+        ContentBlock::ToolUse { id, name, .. } if role != "assistant" => {
+            json!({ "type": "text", "text": format!("[tool_use {name} ({id})]") })
+        }
+        ContentBlock::ToolResult { tool_use_id, .. } if role != "user" => {
+            json!({ "type": "text", "text": format!("[tool_result for {tool_use_id}]") })
+        }
+        _ => render_block(block),
     }
 }
 
@@ -471,6 +497,46 @@ mod tests {
                 .iter()
                 .all(|b| b["type"] == "text" || b["type"] == "image")
         );
+    }
+
+    #[test]
+    fn role_validation_linearizes_misplaced_tool_blocks() {
+        // tool_result inside an ASSISTANT message is invalid -> text.
+        let assistant = RichMessage::blocks(
+            "assistant",
+            vec![
+                ContentBlock::Text { text: "hi".into() },
+                ContentBlock::ToolResult {
+                    tool_use_id: "x".into(),
+                    is_error: false,
+                    content: vec![ContentBlock::Text {
+                        text: "ignored".into(),
+                    }],
+                },
+            ],
+        );
+        // tool_use inside a USER message is invalid -> text.
+        let user = RichMessage::blocks(
+            "user",
+            vec![ContentBlock::ToolUse {
+                id: "c".into(),
+                name: "shell".into(),
+                input: json!({}),
+            }],
+        );
+        let rendered = render_cache_control_rich(&[assistant, user]);
+
+        // Assistant turn: text stays, tool_result demoted to text.
+        let a = &rendered.messages[0]["content"];
+        assert_eq!(a[0]["type"], "text");
+        assert_eq!(a[1]["type"], "text");
+        assert_eq!(a[1]["text"], "[tool_result for x]");
+        assert!(a.as_array().unwrap().iter().all(|b| b["type"] == "text"));
+
+        // User turn: tool_use demoted to text.
+        let u = &rendered.messages[1]["content"];
+        assert_eq!(u[0]["type"], "text");
+        assert_eq!(u[0]["text"], "[tool_use shell (c)]");
     }
 
     #[test]

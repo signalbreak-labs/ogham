@@ -29,6 +29,17 @@ const ERROR_CLASS_MAP: &[(&str, &str)] = &[
 /// but its content matches none of the textual patterns.
 const TOOL_ERROR_CLASS: &str = "tool_error";
 
+/// Bytes of each message scanned for file paths. Compaction runs on oversized
+/// tool output, so path extraction is bounded to keep it from amplifying into a
+/// memory/CPU cost on attacker-sized content.
+const MAX_PATH_SCAN_BYTES: usize = 64 * 1024;
+/// Hard cap on raw path candidates collected before dedup, so a pathological
+/// input cannot grow the intermediate vector without bound.
+const MAX_RAW_PATHS: usize = 4096;
+/// Maximum tags kept per category after dedup. More than this in one fold is
+/// low-signal for retrieval; the highest-sorted are kept deterministically.
+const MAX_TAGS_PER_KIND: usize = 64;
+
 /// File extensions treated as path-like even without a `/` separator, so a bare
 /// `Cargo.toml` or `login.rs` is recognized while `e.g` or `1.2.3` is not.
 const KNOWN_EXTENSIONS: &[&str] = &[
@@ -100,13 +111,15 @@ pub fn extract_fold_tags(originals: &[Message]) -> FoldTags {
             tool_names.push(tool.clone());
         }
         collect_error_classes(msg, &mut error_classes);
-        collect_file_paths(&msg.content, &mut file_paths);
+        if file_paths.len() < MAX_RAW_PATHS {
+            collect_file_paths(&msg.content, &mut file_paths);
+        }
     }
 
     FoldTags {
-        tool_names: sorted_unique(tool_names),
-        error_classes: sorted_unique(error_classes),
-        file_paths: sorted_unique(file_paths),
+        tool_names: sorted_unique_capped(tool_names),
+        error_classes: sorted_unique_capped(error_classes),
+        file_paths: sorted_unique_capped(file_paths),
     }
 }
 
@@ -123,7 +136,8 @@ fn collect_error_classes(msg: &Message, out: &mut Vec<String>) {
 }
 
 fn collect_file_paths(content: &str, out: &mut Vec<String>) {
-    for raw in content.split(|c: char| {
+    let window = prefix_to_char_boundary(content, MAX_PATH_SCAN_BYTES);
+    for raw in window.split(|c: char| {
         c.is_whitespace()
             || matches!(
                 c,
@@ -145,6 +159,9 @@ fn collect_file_paths(content: &str, out: &mut Vec<String>) {
                     | '*'
             )
     }) {
+        if out.len() >= MAX_RAW_PATHS {
+            break;
+        }
         let token = raw
             .trim_matches(|c: char| !(c.is_alphanumeric() || matches!(c, '/' | '.' | '_' | '-')));
         if let Some(path) = looks_like_path(token) {
@@ -175,9 +192,10 @@ fn looks_like_path(token: &str) -> Option<String> {
     }
 }
 
-fn sorted_unique(mut values: Vec<String>) -> Vec<String> {
+fn sorted_unique_capped(mut values: Vec<String>) -> Vec<String> {
     values.sort();
     values.dedup();
+    values.truncate(MAX_TAGS_PER_KIND);
     values
 }
 
@@ -236,7 +254,23 @@ mod tests {
         // Sorted + deduped.
         assert_eq!(
             tags.error_classes,
-            sorted_unique(tags.error_classes.clone())
+            sorted_unique_capped(tags.error_classes.clone())
+        );
+    }
+
+    #[test]
+    fn file_path_extraction_is_bounded() {
+        // Pathological input: many distinct path-like tokens. Tags must stay
+        // capped so they cannot amplify into fold records / recall.
+        let mut content = String::with_capacity(2_000_000);
+        for i in 0..200_000 {
+            content.push_str(&format!("src/m{i}/file{i}.rs "));
+        }
+        let tags = extract_fold_tags(&[Message::new("tool", content)]);
+        assert!(
+            tags.file_paths.len() <= MAX_TAGS_PER_KIND,
+            "file_paths capped at {MAX_TAGS_PER_KIND}, got {}",
+            tags.file_paths.len()
         );
     }
 

@@ -218,8 +218,13 @@ pub async fn compact_conversation(
         dropped,
         counter.as_ref(),
     );
-    let cache_plan =
-        apply_cache_policy(&mut working, config.cache, counter.as_ref(), &mut warnings);
+    let cache_plan = apply_cache_policy(
+        &mut working,
+        config.cache,
+        model,
+        counter.as_ref(),
+        &mut warnings,
+    );
 
     Ok(CompactResult {
         messages: working,
@@ -493,6 +498,7 @@ fn extract_ccr_marker(content: &str) -> Option<String> {
 pub(crate) fn apply_cache_policy(
     messages: &mut [Message],
     policy: CachePolicy,
+    model: &str,
     counter: &dyn TokenCounter,
     warnings: &mut Vec<String>,
 ) -> CachePlan {
@@ -566,7 +572,16 @@ pub(crate) fn apply_cache_policy(
     let prefix_len = messages.len().saturating_sub(stable_suffix_messages);
     let prefix = &messages[..prefix_len];
     let stable_prefix_tokens = counter.count_messages(prefix);
-    let cacheable = stable_prefix_tokens >= crate::providers::openai::MIN_CACHEABLE_PREFIX_TOKENS;
+    // The minimum cacheable prefix is provider- (and for Anthropic, model-)
+    // specific. Using OpenAI's 1024 for an Anthropic model that needs 2048/4096
+    // would falsely report `cacheable` and suppress the warning.
+    let min_cacheable = match policy {
+        CachePolicy::Anthropic { .. } => {
+            crate::providers::anthropic::min_cacheable_prefix_tokens(model)
+        }
+        _ => crate::providers::openai::MIN_CACHEABLE_PREFIX_TOKENS,
+    };
+    let cacheable = stable_prefix_tokens >= min_cacheable;
 
     // Content-keyed providers (OpenAI prompt_cache_key, Gemini CachedContent)
     // identify the prefix by content; Anthropic uses cache_control breakpoints.
@@ -580,8 +595,7 @@ pub(crate) fn apply_cache_policy(
     let mut notes = Vec::new();
     if stable_suffix_messages > 0 && !prefix.is_empty() && !cacheable {
         notes.push(format!(
-            "stable prefix is {stable_prefix_tokens} tokens; provider prompt caching typically engages around {}+",
-            crate::providers::openai::MIN_CACHEABLE_PREFIX_TOKENS
+            "stable prefix is {stable_prefix_tokens} tokens; provider prompt caching typically engages around {min_cacheable}+"
         ));
     }
 
@@ -681,6 +695,34 @@ mod tests {
         // Anthropic uses cache_control breakpoints, not a content key.
         assert!(result.cache_plan.content_key.is_none());
         assert_eq!(result.cache_plan.stable_prefix_messages, 2);
+    }
+
+    #[tokio::test]
+    async fn anthropic_cache_plan_uses_model_specific_threshold() {
+        // A stable prefix above OpenAI's 1024 minimum but below Opus 4.5's 4096.
+        let big = "lorem ipsum dolor sit amet ".repeat(500);
+        let result = compact_conversation(
+            vec![Message::new("system", big), Message::new("user", "hi")],
+            CompactConfig {
+                cache: CachePolicy::Anthropic {
+                    stable_suffix_messages: 1,
+                },
+                model: Some("claude-opus-4-5".to_string()),
+                ..CompactConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let tokens = result.cache_plan.stable_prefix_tokens;
+        assert!(
+            (1024..4096).contains(&tokens),
+            "prefix should sit between the OpenAI and Opus-4.5 thresholds ({tokens})"
+        );
+        // With OpenAI's 1024 this would be `cacheable`; the model-aware Anthropic
+        // threshold (4096) correctly reports it is not yet cacheable.
+        assert!(!result.cache_plan.cacheable);
+        assert!(result.cache_plan.notes.iter().any(|n| n.contains("4096")));
     }
 
     #[tokio::test]

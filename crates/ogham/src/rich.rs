@@ -304,8 +304,13 @@ pub async fn compact_rich(
         dropped,
         counter.as_ref(),
     );
-    let cache_plan =
-        apply_cache_policy(&mut working, config.cache, counter.as_ref(), &mut warnings);
+    let cache_plan = apply_cache_policy(
+        &mut working,
+        config.cache,
+        model,
+        counter.as_ref(),
+        &mut warnings,
+    );
 
     // Block-compress kept, non-protected messages (structure preserving, with
     // clean rich CCR ids and their own Compressed fold records).
