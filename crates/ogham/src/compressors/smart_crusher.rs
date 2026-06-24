@@ -6,6 +6,8 @@ use tracing::debug;
 
 use crate::adaptive_sizer::compute_optimal_k;
 use crate::ccr::{CcrStore, compute_key, marker_for};
+// Focus/question-hint steering is shared across the content compressors.
+use crate::compressors::focus::{relevance as focus_relevance, terms as focus_terms};
 // use crate::detect::is_json_array_of_dicts; // unused for now
 use crate::stats_math;
 
@@ -459,6 +461,11 @@ pub struct SmartCrusher {
     ccr_store: Option<std::sync::Arc<dyn CcrStore>>,
 }
 
+struct PendingCcrSave {
+    id: String,
+    original: String,
+}
+
 impl SmartCrusher {
     pub fn new() -> Self {
         Self {
@@ -475,15 +482,43 @@ impl SmartCrusher {
     }
 
     /// Compress JSON content recursively.
-    pub fn crush(&self, content: &str, _query: &str, bias: f64) -> String {
-        let Ok(parsed) = serde_json::from_str::<Value>(content) else {
-            return content.to_string();
-        };
-        let (crushed, _) = self.process_value(&parsed, 0, bias);
-        serde_json::to_string(&crushed).unwrap_or_else(|_| content.to_string())
+    ///
+    /// `query` is an optional focus/question hint: records whose serialized form
+    /// matches its terms are boosted so they survive sampling. An empty `query`
+    /// leaves selection unchanged. See `ROADMAP.md` ("Consume the focus hint").
+    pub fn crush(&self, content: &str, query: &str, bias: f64) -> String {
+        self.crush_with_options(content, query, bias, false).0
     }
 
-    fn process_value(&self, value: &Value, depth: usize, bias: f64) -> (Value, String) {
+    fn crush_with_options(
+        &self,
+        content: &str,
+        query: &str,
+        bias: f64,
+        emit_ccr_markers: bool,
+    ) -> (String, Vec<PendingCcrSave>) {
+        let Ok(parsed) = serde_json::from_str::<Value>(content) else {
+            return (content.to_string(), Vec::new());
+        };
+        let focus = focus_terms(query);
+        let mut ccr_saves = Vec::new();
+        let (crushed, _) =
+            self.process_value(&parsed, 0, bias, &focus, emit_ccr_markers, &mut ccr_saves);
+        (
+            serde_json::to_string(&crushed).unwrap_or_else(|_| content.to_string()),
+            ccr_saves,
+        )
+    }
+
+    fn process_value(
+        &self,
+        value: &Value,
+        depth: usize,
+        bias: f64,
+        focus: &[String],
+        emit_ccr_markers: bool,
+        ccr_saves: &mut Vec<PendingCcrSave>,
+    ) -> (Value, String) {
         const MAX_DEPTH: usize = 50;
         if depth >= MAX_DEPTH {
             return (value.clone(), String::new());
@@ -496,7 +531,13 @@ impl SmartCrusher {
                     let arr_type = classify_array(arr);
                     match arr_type {
                         ArrayType::DictArray => {
-                            let (items, strategy, ccr_hash) = self.crush_dict_array(arr, bias);
+                            let (items, strategy, ccr_hash) = self.crush_dict_array(
+                                arr,
+                                bias,
+                                focus,
+                                emit_ccr_markers,
+                                ccr_saves,
+                            );
                             info_parts.push(strategy);
                             if let Some(hash) = ccr_hash {
                                 let mut items_with_sentinel = items.clone();
@@ -524,7 +565,13 @@ impl SmartCrusher {
                             return (Value::Array(crushed), info_parts.join(","));
                         }
                         ArrayType::MixedArray => {
-                            let (crushed, strategy) = self.crush_mixed_array(arr, bias);
+                            let (crushed, strategy) = self.crush_mixed_array(
+                                arr,
+                                bias,
+                                focus,
+                                emit_ccr_markers,
+                                ccr_saves,
+                            );
                             info_parts.push(format!("{}({}->{})", strategy, n, crushed.len()));
                             return (Value::Array(crushed), info_parts.join(","));
                         }
@@ -533,7 +580,14 @@ impl SmartCrusher {
                 }
                 let mut processed: Vec<Value> = Vec::with_capacity(n);
                 for item in arr {
-                    let (p_item, p_info) = self.process_value(item, depth + 1, bias);
+                    let (p_item, p_info) = self.process_value(
+                        item,
+                        depth + 1,
+                        bias,
+                        focus,
+                        emit_ccr_markers,
+                        ccr_saves,
+                    );
                     processed.push(p_item);
                     if !p_info.is_empty() {
                         info_parts.push(p_info);
@@ -544,7 +598,8 @@ impl SmartCrusher {
             Value::Object(map) => {
                 let mut processed = serde_json::Map::new();
                 for (k, v) in map {
-                    let (p_val, p_info) = self.process_value(v, depth + 1, bias);
+                    let (p_val, p_info) =
+                        self.process_value(v, depth + 1, bias, focus, emit_ccr_markers, ccr_saves);
                     processed.insert(k.clone(), p_val);
                     if !p_info.is_empty() {
                         info_parts.push(p_info);
@@ -563,7 +618,14 @@ impl SmartCrusher {
         }
     }
 
-    fn crush_dict_array(&self, items: &[Value], bias: f64) -> (Vec<Value>, String, Option<String>) {
+    fn crush_dict_array(
+        &self,
+        items: &[Value],
+        bias: f64,
+        focus: &[String],
+        emit_ccr_markers: bool,
+        ccr_saves: &mut Vec<PendingCcrSave>,
+    ) -> (Vec<Value>, String, Option<String>) {
         let item_strings: Vec<String> = items
             .iter()
             .map(|i| serde_json::to_string(i).unwrap_or_default())
@@ -589,12 +651,13 @@ impl SmartCrusher {
         for i in items.len().saturating_sub(k_last)..items.len() {
             keep_indices.insert(i);
         }
-        // Score by length variance (longer/shorter = more interesting)
+        // Score by length variance (longer/shorter = more interesting), with a
+        // focus boost so records matching the question hint survive sampling.
         let mut scored: Vec<(usize, f64)> = (0..items.len())
             .map(|i| {
                 let s = &item_str_refs[i];
                 let len_score = (s.len() as f64).ln_1p();
-                (i, len_score)
+                (i, len_score + focus_relevance(s, focus))
             })
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -606,18 +669,13 @@ impl SmartCrusher {
         }
         let result: Vec<Value> = keep_indices.iter().map(|&i| items[i].clone()).collect();
         let dropped_count = items.len().saturating_sub(result.len());
-        let ccr_hash = if dropped_count > 0 && self.config.enable_ccr_marker {
+        let ccr_hash = if dropped_count > 0 && self.config.enable_ccr_marker && emit_ccr_markers {
             let canonical = serde_json::to_string(items).unwrap_or_default();
             let h = compute_key(canonical.as_bytes());
-            if let Some(store) = &self.ccr_store {
-                let store_ref = store.clone();
-                let h_clone = h.clone();
-                let canonical_clone = canonical.clone();
-                // Fire-and-forget async save.
-                tokio::spawn(async move {
-                    let _ = store_ref.save(&h_clone, &canonical_clone, None).await;
-                });
-            }
+            ccr_saves.push(PendingCcrSave {
+                id: h.clone(),
+                original: canonical,
+            });
             Some(h)
         } else {
             None
@@ -626,7 +684,14 @@ impl SmartCrusher {
         (result, strategy, ccr_hash)
     }
 
-    fn crush_mixed_array(&self, items: &[Value], bias: f64) -> (Vec<Value>, String) {
+    fn crush_mixed_array(
+        &self,
+        items: &[Value],
+        bias: f64,
+        focus: &[String],
+        emit_ccr_markers: bool,
+        ccr_saves: &mut Vec<PendingCcrSave>,
+    ) -> (Vec<Value>, String) {
         let n = items.len();
         if n <= 8 {
             return (items.to_vec(), "mixed:passthrough".to_string());
@@ -671,7 +736,8 @@ impl SmartCrusher {
             }
             match type_key {
                 "dict" => {
-                    let (crushed, _strategy, _) = self.crush_dict_array(&values, bias);
+                    let (crushed, _strategy, _) =
+                        self.crush_dict_array(&values, bias, focus, emit_ccr_markers, ccr_saves);
                     let crushed_keys: HashSet<String> = crushed
                         .iter()
                         .map(|v| serde_json::to_string(v).unwrap_or_default())
@@ -764,7 +830,8 @@ impl Compressor for SmartCrusher {
             1.0
         };
         let query = ctx.question_hint.as_deref().unwrap_or("");
-        let compressed = self.crush(&text, query, bias);
+        let emit_ccr_markers = ctx.reversible && self.ccr_store.is_some();
+        let (compressed, ccr_saves) = self.crush_with_options(&text, query, bias, emit_ccr_markers);
         let original_tokens = text.len() / 4;
         let compressed_tokens = compressed.len() / 4;
         let id = if ctx.reversible {
@@ -775,12 +842,10 @@ impl Compressor for SmartCrusher {
         if ctx.reversible
             && let Some(store) = &self.ccr_store
         {
-            let store_ref = store.clone();
-            let id_clone = id.clone();
-            let text_clone = text.to_string();
-            tokio::spawn(async move {
-                let _ = store_ref.save(&id_clone, &text_clone, None).await;
-            });
+            for pending in &ccr_saves {
+                store.save(&pending.id, &pending.original, None).await?;
+            }
+            store.save(&id, &text, None).await?;
         }
         Ok(Compressed {
             id,
@@ -864,5 +929,32 @@ mod tests {
         let input = r#"[{"id":1,"name":"alice"},{"id":2,"name":"bob"},{"id":3,"name":"charlie"}]"#;
         let out = crusher.crush(input, "", 1.0);
         assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn focus_hint_biases_kept_records() {
+        // 60 uniform records; the needle sits in the middle band that
+        // length-based sampling discards. All records share a length so the
+        // only thing that can rescue the needle is a matching focus hint.
+        let items: Vec<Value> = (0..60)
+            .map(|i| {
+                let tag = if i == 30 { "zqxjv" } else { "aaaaa" };
+                json!({ "id": format!("{:02}", i), "tag": tag })
+            })
+            .collect();
+        let input = serde_json::to_string(&Value::Array(items)).unwrap();
+        let crusher = SmartCrusher::new();
+
+        let without_focus = crusher.crush(&input, "", 1.0);
+        let with_focus = crusher.crush(&input, "zqxjv", 1.0);
+
+        assert!(
+            !without_focus.contains("zqxjv"),
+            "needle must be dropped without a focus hint (else the test is vacuous)"
+        );
+        assert!(
+            with_focus.contains("zqxjv"),
+            "a matching focus hint must pull the needle into the kept set"
+        );
     }
 }

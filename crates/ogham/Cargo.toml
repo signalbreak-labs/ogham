@@ -12,8 +12,14 @@ keywords.workspace = true
 categories.workspace = true
 
 [features]
+# Lean by default: in-memory CCR only, no heavy embedded backends. Opt into a
+# persistent store with `ccr-sqlite` and/or `ccr-fjall`. (Through 0.3 these were
+# on by default; see CHANGELOG for the 0.4 migration.)
 default = []
 tiktoken = ["dep:tiktoken-rs"]
+# Persistent CCR stores, each pulling a heavy backend only when enabled.
+ccr-sqlite = ["dep:rusqlite"]
+ccr-fjall = ["dep:fjall"]
 
 [dependencies]
 ogham-core = { workspace = true }
@@ -28,12 +34,12 @@ tracing = { workspace = true }
 
 tiktoken-rs = { version = "0.12", optional = true }
 
-fjall = "2"
+blake3 = "1"
 regex = "1"
-aho-corasick = "1"
 md5 = "0.8"
 flate2 = "1"
-rusqlite = { version = ">=0.38, <0.41", features = ["bundled"] }
+fjall = { version = "2", optional = true }
+rusqlite = { version = ">=0.38, <0.41", features = ["bundled"], optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"

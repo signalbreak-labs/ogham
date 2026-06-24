@@ -33,11 +33,16 @@ Use a single store for the pipeline, agent rules, and your retrieve tool so
 every `<<ccr:HASH>>` marker resolves:
 
 ```rust
+// requires features = ["ccr-fjall"]  (or use ccr-sqlite, or the default in-memory store)
 use std::sync::Arc;
 use ogham::ccr::{CcrStore, fjall::FjallCcrStore};
 
 let ccr: Arc<dyn CcrStore> = Arc::new(FjallCcrStore::new(data_dir.join("ccr"))?);
 ```
+
+The persistent backends are opt-in (`ccr-sqlite` / `ccr-fjall`); the default
+build ships the in-memory store only. For a durable session that must never lose
+a referenced original, use `InMemoryCcrStore::unbounded()` or a persistent store.
 
 Already running fjall? Share the keyspace instead of opening a second
 database — see `FjallCcrStore` constructors. Parallel agents sharing one
@@ -50,6 +55,13 @@ identically. The model will use it when a cleared result turns out to
 matter. Budget for retrievals: clearing saves tokens *net of* the
 occasional re-fetch.
 
+**Search folded memory by relevance, not just exact id.** A `ContextSession`
+maintains a deterministic BM25 `recall()` index over everything it has folded;
+search it (or filter by typed tag via `RecallIndex::find_by_tag` —
+`tool_names` / `error_classes` / `file_paths`) to recover the CCR ids worth
+re-fetching, e.g. "what did the auth tool say earlier?" This closes the
+exact-id-only gap in plain CCR.
+
 **Tag tool-call pairs.** Set `meta_keys::TOOL_CALL_ID` on both the
 assistant message that makes a tool call and its result message(s). Ogham
 keeps pairs intact positionally either way, but the tag makes audits and
@@ -61,21 +73,50 @@ tests exact.
 
 ### 3. Compress at the message-assembly boundary
 
-Run the conversation-level passes once per LLM call, right before provider
-serialization (full snippet in
-[agent-context.md](agent-context.md#putting-it-together)):
+Run compaction once per LLM call, right before provider serialization. You have
+three options, lowest to highest level:
 
-```rust
-apply_agent_compression(&mut msgs, &policy, Some(ccr.clone())).await?;
-enforce_budget(&mut msgs, &budget, counter.as_ref(), &pipeline, &policy,
-               Some(ccr.clone())).await?;   // Err(BudgetExceeded) => do NOT send
-align_messages(&mut msgs);
-apply_cache_strategy(&mut msgs, CacheStrategy::Anthropic, policy_recent);
-```
+- **`ContextSession` (recommended for agent runtimes).** Stateful and
+  incremental: `push()` each new turn, `compact()` folds only the active tail and
+  freezes already-folded messages, so per-turn work scales with new content, not
+  history length. It keeps an append-only fold ledger and a searchable
+  `recall()` index, and the finalized prefix stays byte-stable for prompt-cache
+  reuse.
+
+  ```rust
+  use ogham::{ContextSession, SessionConfig};
+
+  // construct once, reuse across turns
+  let mut session = ContextSession::new(SessionConfig {
+      budget: Some(budget), agent_policy: policy, ccr: ccr_policy,
+      cache: ogham::CachePolicy::Anthropic { stable_suffix_messages: 4 },
+      ..Default::default()
+  });
+  // per turn:
+  session.push(new_turn);
+  let step = session.compact().await?;   // Err(BudgetExceeded) => do NOT send
+  let outbound = session.messages();
+  ```
+
+- **`compact_conversation()` / `compact_rich()`** — one-shot compaction of a
+  flat history (or block-structured `RichMessage`s) returning a `CompactResult`
+  with the same audit records. Use when you re-derive the prompt each call.
+
+- **The raw passes** — compose them yourself for full control (full snippet in
+  [agent-context.md](agent-context.md#putting-it-together)):
+
+  ```rust
+  apply_agent_compression(&mut msgs, &policy, Some(ccr.clone())).await?;
+  enforce_budget(&mut msgs, &budget, counter.as_ref(), &pipeline, &policy,
+                 Some(ccr.clone())).await?;   // Err(BudgetExceeded) => do NOT send
+  align_messages(&mut msgs);
+  apply_cache_strategy(&mut msgs, CacheStrategy::Anthropic, policy_recent);
+  ```
 
 Your provider adapter then maps `metadata["ogham.cache_control"] ==
-"ephemeral"` onto the provider's cache-control wire format, and strips
-`ogham.*` keys from what is actually sent.
+"ephemeral"` onto the provider's cache-control wire format (or, for native
+block rendering on Claude, use `providers::anthropic::render_cache_control_rich`),
+and strips `ogham.*` keys from what is actually sent.
 
 ### 4. Audit via `Observer`, measure via `Metrics`
 
@@ -146,7 +187,8 @@ exact counters and 5% for estimates. Enable the `tiktoken` feature for exact
 OpenAI counts:
 
 ```toml
-ogham = { git = "https://github.com/signalbreak-labs/ogham", tag = "v0.3.0", features = ["tiktoken"] }
+# Add the persistent store you use, plus tiktoken for exact OpenAI counts:
+ogham = { git = "https://github.com/signalbreak-labs/ogham", tag = "v0.4.0", features = ["ccr-fjall", "tiktoken"] }
 ```
 
 ## Configuration mapping example

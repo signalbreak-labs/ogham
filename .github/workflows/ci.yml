@@ -28,8 +28,18 @@ jobs:
         run: cargo fmt --all --check
       - name: clippy (all targets, default features)
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: clippy (ogham, no default features)
+        run: cargo clippy -p ogham --all-targets --no-default-features -- -D warnings
       - name: clippy (tiktoken feature)
         run: cargo clippy -p ogham --all-targets --features tiktoken -- -D warnings
+      - name: Default ogham build stays lean (no rusqlite/fjall)
+        working-directory: crates/ogham
+        run: |
+          if cargo tree -e normal | grep -iE "rusqlite|fjall"; then
+            echo "::error::default ogham build pulled a heavy CCR backend"
+            exit 1
+          fi
+          echo "default ogham dependency tree is lean"
 
   test:
     name: Test (${{ matrix.os }})
@@ -47,6 +57,15 @@ jobs:
       - name: Test (tiktoken feature)
         if: matrix.os == 'ubuntu-latest'
         run: cargo test -p ogham --features tiktoken
+      - name: Test (no default features)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test -p ogham --no-default-features --all-targets
+      - name: Test (sqlite CCR feature)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test -p ogham --no-default-features --features ccr-sqlite --all-targets
+      - name: Test (fjall CCR feature)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test -p ogham --no-default-features --features ccr-fjall --all-targets
       - name: Benchmarks compile
         if: matrix.os == 'ubuntu-latest'
         run: cargo bench -p ogham --no-run

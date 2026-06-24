@@ -146,8 +146,6 @@ async fn round_trip_json_array_via_ccr() {
         .expect("CCR id not found");
 
     let crusher = pipe.get_compressor("smart_crusher").unwrap();
-    // Fire-and-forget save may need a moment.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     let retrieved = crusher
         .retrieve(id)
         .await
@@ -172,8 +170,6 @@ async fn round_trip_build_log_via_ccr() {
     let id = compute_key(input.as_bytes());
 
     let stripper = pipe.get_compressor("log_stripper").unwrap();
-    // Fire-and-forget save may need a moment.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     let retrieved = stripper
         .retrieve(&id)
         .await

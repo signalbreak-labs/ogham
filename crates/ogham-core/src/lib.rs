@@ -18,16 +18,18 @@
 //! - **Metadata tags:** agent semantics ride on
 //!   [`Message::metadata`] using the namespaced keys in [`meta_keys`].
 
+pub mod content;
 pub mod error;
 pub mod metrics;
 pub mod token;
 
+pub use content::{ContentBlock, ImageSource, META_FLATTENED, MessageContent, RichMessage};
 pub use error::{OghamError, Result};
 pub use metrics::{
     CompressionEvent, Metrics, NoopMetrics, NoopObserver, Observer, PerCompressorStats,
     PipelineStats, TestMetrics, TestObserver,
 };
-pub use token::{OVERHEAD_PER_MESSAGE, TokenCounter};
+pub use token::{OVERHEAD_PER_MESSAGE, TokenCountKind, TokenCounter};
 
 use async_trait::async_trait;
 use bytes::Bytes;

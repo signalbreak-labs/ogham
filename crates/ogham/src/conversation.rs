@@ -10,7 +10,7 @@
 //! retaining semantic continuity.
 
 use crate::pipeline::DefaultCompressionPipeline;
-use ogham_core::{CompressionContext, CompressionPipeline, Message, Result};
+use ogham_core::{CompressionContext, CompressionPipeline, Message, Result, meta_keys};
 
 /// How aggressively to compress different age bands.
 #[derive(Debug, Clone, Copy)]
@@ -65,6 +65,9 @@ pub async fn compress_conversation_history(
         messages,
         recent_start.saturating_sub(config.compress_middle),
     );
+    // Never summarise or drop across a pinned message: shrink the old band so a
+    // pinned message falls into the compress band, which preserves it verbatim.
+    let middle_start = clamp_band_start_before_pinned(messages, middle_start);
 
     let mut stats = ConversationStats::default();
 
@@ -96,7 +99,14 @@ pub async fn compress_conversation_history(
         stats.original_middle_tokens = compressed.stats.original_tokens;
         stats.compressed_middle_tokens = compressed.stats.compressed_tokens;
 
-        for msg in compressed.messages.into_iter().rev() {
+        // Honor the PINNED contract: a pinned message is never rewritten.
+        let mut out_msgs = compressed.messages;
+        for (i, original) in middle.iter().enumerate() {
+            if original.metadata.get(meta_keys::PINNED).map(String::as_str) == Some("true") {
+                out_msgs[i] = original.clone();
+            }
+        }
+        for msg in out_msgs.into_iter().rev() {
             messages.insert(0, msg);
         }
     }
@@ -130,6 +140,9 @@ pub async fn compress_conversation_history_with_summarizer(
         messages,
         recent_start.saturating_sub(config.compress_middle),
     );
+    // Never summarise or drop across a pinned message: shrink the old band so a
+    // pinned message falls into the compress band, which preserves it verbatim.
+    let middle_start = clamp_band_start_before_pinned(messages, middle_start);
 
     let mut stats = ConversationStats::default();
 
@@ -180,7 +193,14 @@ pub async fn compress_conversation_history_with_summarizer(
         stats.original_middle_tokens = compressed.stats.original_tokens;
         stats.compressed_middle_tokens = compressed.stats.compressed_tokens;
 
-        for msg in compressed.messages.into_iter().rev() {
+        // Honor the PINNED contract: a pinned message is never rewritten.
+        let mut out_msgs = compressed.messages;
+        for (i, original) in middle.iter().enumerate() {
+            if original.metadata.get(meta_keys::PINNED).map(String::as_str) == Some("true") {
+                out_msgs[i] = original.clone();
+            }
+        }
+        for msg in out_msgs.into_iter().rev() {
             messages.insert(0, msg);
         }
     }
@@ -203,6 +223,18 @@ fn align_band_start(messages: &[Message], mut idx: usize) -> usize {
         idx -= 1;
     }
     idx
+}
+
+/// Shrink a band-start so the summarised/dropped prefix never includes a pinned
+/// message — honoring the `PINNED` contract ("never compressed, cleared, or
+/// summarized"). Pinned messages fall into the compress band instead, which
+/// passes them through verbatim.
+fn clamp_band_start_before_pinned(messages: &[Message], idx: usize) -> usize {
+    messages
+        .iter()
+        .take(idx)
+        .position(|m| m.metadata.get(meta_keys::PINNED).map(String::as_str) == Some("true"))
+        .unwrap_or(idx)
 }
 
 /// Truncate to at most `max` bytes without splitting a UTF-8 char.
@@ -423,6 +455,101 @@ mod tests {
                 || msgs[0]
                     .content
                     .starts_with("[Earlier conversation summary]")
+        );
+    }
+
+    #[tokio::test]
+    async fn pinned_middle_message_is_not_compressed() {
+        // A pinned, highly-compressible message sitting in the middle band must
+        // pass through byte-for-byte (the documented PINNED contract).
+        let big: Vec<_> = (0..60)
+            .map(|i| serde_json::json!({ "id": i, "name": format!("item_{i}"), "score": i }))
+            .collect();
+        let big_json = serde_json::to_string(&big).unwrap();
+        let mut pinned = Message::new("tool", big_json.clone());
+        pinned
+            .metadata
+            .insert(meta_keys::PINNED.to_string(), "true".to_string());
+
+        let mut msgs = vec![
+            Message::new("system", "sys"),
+            pinned,
+            Message::new("user", "u1"),
+            Message::new("assistant", "a1"),
+            Message::new("user", "recent"),
+        ];
+        let pipeline = DefaultCompressionPipeline::with_builtin_compressors(
+            None,
+            crate::pipeline::DEFAULT_COMPRESSORS,
+        )
+        .unwrap();
+        let ctx = CompressionContext {
+            model: "default".into(),
+            question_hint: None,
+            max_tokens: None,
+            reversible: false,
+        };
+        let config = ConversationConfig {
+            preserve_recent: 2,
+            compress_middle: 10,
+            summary_old: false,
+            bias_system: 0.8,
+        };
+        compress_conversation_history(&mut msgs, &config, &pipeline, &ctx)
+            .await
+            .unwrap();
+
+        assert!(
+            msgs.iter().any(|m| m.content == big_json
+                && m.metadata.get(meta_keys::PINNED).map(String::as_str) == Some("true")),
+            "a pinned message must never be compressed"
+        );
+    }
+
+    #[tokio::test]
+    async fn pinned_old_message_is_not_summarized() {
+        let mut pinned = Message::new("tool", "PINNED_KEEP_VERBATIM");
+        pinned
+            .metadata
+            .insert(meta_keys::PINNED.to_string(), "true".to_string());
+
+        let mut msgs = vec![
+            Message::new("user", "old turn to summarize"),
+            pinned,
+            Message::new("assistant", "m1"),
+            Message::new("user", "m2"),
+            Message::new("assistant", "recent1"),
+            Message::new("user", "recent2"),
+        ];
+        let pipeline = DefaultCompressionPipeline::new(None, None);
+        let ctx = CompressionContext {
+            model: "default".into(),
+            question_hint: None,
+            max_tokens: None,
+            reversible: false,
+        };
+        let config = ConversationConfig {
+            preserve_recent: 2,
+            compress_middle: 1,
+            summary_old: true,
+            bias_system: 0.8,
+        };
+        compress_conversation_history(&mut msgs, &config, &pipeline, &ctx)
+            .await
+            .unwrap();
+
+        // The pinned message survives verbatim, never folded into the summary.
+        assert!(
+            msgs.iter().any(|m| m.content == "PINNED_KEEP_VERBATIM"
+                && m.metadata.get(meta_keys::PINNED).map(String::as_str) == Some("true")),
+            "a pinned message must never be summarized"
+        );
+        // No nested summary-of-a-summary.
+        assert!(
+            !msgs.iter().any(|m| m
+                .content
+                .contains("[Earlier conversation context]: [Earlier")),
+            "summaries must not nest"
         );
     }
 }

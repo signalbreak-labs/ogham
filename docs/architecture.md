@@ -13,7 +13,9 @@ Ogham is three crates with a strict one-way dependency flow:
 │  detection · compressors    │  │  embeddable Axum router    │
 │  pipeline · CCR stores      │  │  /compress /retrieve       │
 │  agent rules · budgets      │  │  /detect /health /stats    │
-│  summaries · cache strategy │  └────────────────────────────┘
+│  compaction · sessions      │  └────────────────────────────┘
+│  rich content · fold recall │
+│  provider cache planning    │
 └──────────────┬──────────────┘
 ┌──────────────▼──────────────┐
 │         ogham-core          │
@@ -74,17 +76,52 @@ query, or anything tagged `ogham.pinned = "true"`. If nothing more can be
 dropped and the history still exceeds the limit, `enforce_budget` returns
 `OghamError::BudgetExceeded` — an oversized prompt is never reported as ok.
 
-## CCR (Content-Compress-Retrieve)
+## High-level entry points
 
-Compression is reversible by default. Originals are stored under their MD5
-content hash and referenced inline as `<<ccr:HASH>>`. The hash is a content
-address, not a security boundary.
+Most hosts use one of three unified entry points rather than composing the
+passes by hand; each runs the cascade and returns auditable records:
 
-| Store | Use case |
-|---|---|
-| `InMemoryCcrStore` | tests, ephemeral sessions (TTL + capacity eviction) |
-| `SqliteCcrStore` | single-node persistence (WAL mode, TTL) |
-| `FjallCcrStore` | LSM-tree production store; can share an existing fjall keyspace |
+| Entry point | Module | For |
+|---|---|---|
+| `compact_conversation()` | `compact` | one-shot compaction of a flat `Vec<Message>` → `CompactResult` (folds, protected report, budget/agent reports, cache plan, warnings) |
+| `compact_rich()` | `rich` | the block-aware analogue over `Vec<RichMessage>` — keeps tool ids, images, and references structured; folds become reversible flat text |
+| `ContextSession` | `session` | stateful, incremental compaction: `push()` turns, `compact()` only the active tail, freeze already-folded messages (work proportional to new content; append-only fold ledger; byte-stable finalized region for prompt-cache reuse) |
+
+Two subsystems make the fold ledger queryable:
+
+- **`recall::RecallIndex`** — a deterministic BM25 keyword index over folded
+  content, addressable by CCR id, so a host can search folds by relevance to
+  recover the ids to retrieve. `ContextSession` maintains one automatically.
+- **`fold_tags`** — each `FoldRecord` carries typed `FoldTags`
+  (`tool_names` / `error_classes` / `file_paths`), filterable via
+  `RecallIndex::find_by_tag`.
+
+Provider cache planning lives in `providers::{openai, gemini, anthropic}`: Ogham
+emits a provider-shaped `CachePlan` (stable-prefix accounting, content keys,
+breakpoint annotations, native Anthropic block rendering); the host owns the HTTP
+call and auth.
+
+## CCR (Compression-Compaction-Reference)
+
+Compression is reversible by default. Originals are stored under a versioned,
+collision-resistant content address — a 128-bit BLAKE3 prefix of the form
+`b3:<32 hex>` (`ccr::compute_key`) — and referenced inline as `<<ccr:HASH>>`.
+The hash is a content address, not a security boundary; the `b3:` version tag
+lets the scheme evolve while older ids stay retrievable.
+
+| Store | Feature | Use case |
+|---|---|---|
+| `InMemoryCcrStore` | (always) | tests, ephemeral sessions (TTL + capacity eviction); `::unbounded()` never evicts, for durable sessions |
+| `SqliteCcrStore` | `ccr-sqlite` | single-node persistence (WAL mode, TTL) |
+| `FjallCcrStore` | `ccr-fjall` | LSM-tree production store; can share an existing fjall keyspace |
+
+The persistent backends are **opt-in features** (not in the default build).
+Beyond plain text, a `CcrStore` can persist a typed `CcrPayload`
+(`save_payload` / `retrieve_payload`) for lossless structured originals (e.g.
+serialized `RichMessage` blocks). UTF-8 payloads use a self-describing text
+envelope (rollback-safe); binary payloads are stored natively — SQLite in BLOB +
+media-type/metadata columns, fjall in a length-prefixed frame — so binary costs
+its real size with no hex overhead.
 
 ## Design invariants
 

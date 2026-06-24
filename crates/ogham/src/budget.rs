@@ -2,7 +2,7 @@ use crate::agent::{self, AgentPolicy};
 use crate::ccr::CcrStore;
 use crate::conversation::{self, ConversationConfig};
 use crate::pipeline::DefaultCompressionPipeline;
-use ogham_core::{Message, OghamError, Result, TokenCounter};
+use ogham_core::{Message, OghamError, Result, TokenCountKind, TokenCounter};
 use std::sync::Arc;
 
 /// Token budget for one LLM call.
@@ -34,6 +34,16 @@ pub struct BudgetReport {
     /// Names of the steps that ran, in order: subset of
     /// ["agent_rules", "compress_middle", "summarize_old", "drop_old"].
     pub steps_applied: Vec<String>,
+    /// How the token counts in this report were produced. Estimated counts mean
+    /// `tokens_initial`/`tokens_final` carry the counter's safety margin.
+    pub count_kind: TokenCountKind,
+    /// The fractional safety margin actually applied to derive `effective_limit`
+    /// from `ContextBudget::total_limit`.
+    pub safety_margin: f64,
+    /// Messages removed by the drop step, in their final (e.g. cleared-stub)
+    /// state. Used to attribute a `Dropped` fold's CCR id when a message was
+    /// cleared before being dropped.
+    pub dropped: Vec<Message>,
 }
 
 /// Make `messages` fit `budget`. Mutates in place. Fail-closed per step;
@@ -49,15 +59,18 @@ pub async fn enforce_budget(
     agent_policy: &AgentPolicy,
     ccr: Option<Arc<dyn CcrStore>>,
 ) -> Result<BudgetReport> {
+    let count_kind = counter.count_kind();
     let margin = budget
         .safety_margin
-        .unwrap_or(if counter.is_exact() { 0.0 } else { 0.05 });
+        .unwrap_or_else(|| count_kind.safety_margin());
     let effective_limit = budget
         .total_limit
         .saturating_sub(((budget.total_limit as f64) * margin).ceil() as usize);
 
     let mut report = BudgetReport {
         effective_limit,
+        count_kind,
+        safety_margin: margin,
         ..BudgetReport::default()
     };
 
@@ -79,10 +92,15 @@ pub async fn enforce_budget(
     }
 
     // Step 2: compress_middle
-    let preserve_recent = 4.max(agent::protected_tail_message_count(
-        messages,
-        agent_policy.protected_tail_tokens,
-    ));
+    let preserve_recent = 4
+        .max(agent::protected_tail_message_count(
+            messages,
+            agent_policy.protected_tail_tokens,
+        ))
+        .max(agent::recent_assistant_preserve_count(
+            messages,
+            agent_policy.keep_recent_assistant,
+        ));
     let cfg2 = ConversationConfig {
         preserve_recent,
         compress_middle: messages.len().saturating_sub(preserve_recent),
@@ -104,10 +122,15 @@ pub async fn enforce_budget(
     }
 
     // Step 3: summarize_old
-    let preserve_recent = 4.max(agent::protected_tail_message_count(
-        messages,
-        agent_policy.protected_tail_tokens,
-    ));
+    let preserve_recent = 4
+        .max(agent::protected_tail_message_count(
+            messages,
+            agent_policy.protected_tail_tokens,
+        ))
+        .max(agent::recent_assistant_preserve_count(
+            messages,
+            agent_policy.keep_recent_assistant,
+        ));
     let cfg3 = ConversationConfig {
         preserve_recent,
         compress_middle: 4,
@@ -190,6 +213,7 @@ pub async fn enforce_budget(
         if let Some((start, end)) = droppable_group {
             let removed: Vec<Message> = messages.drain(start..end).collect();
             running = running.saturating_sub(counter.count_messages(&removed));
+            report.dropped.extend(removed);
             if running <= effective_limit {
                 // Authoritative recount before exiting the loop, in case the
                 // counter is not strictly additive across messages.
@@ -525,5 +549,118 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(report.effective_limit, 95);
+    }
+
+    #[tokio::test]
+    async fn report_surfaces_count_kind_and_margin() {
+        let pipeline = DefaultCompressionPipeline::new(None, None);
+        let policy = AgentPolicy::default();
+        let budget = ContextBudget {
+            total_limit: 1_000_000,
+            safety_margin: None,
+        };
+
+        // Estimated counter (no explicit margin) -> nonzero applied margin.
+        let mut msgs = make_text_msgs(3, 10);
+        let report = enforce_budget(
+            &mut msgs,
+            &budget,
+            &HeuristicCounter::new(),
+            &pipeline,
+            &policy,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!report.count_kind.is_exact());
+        assert!(report.safety_margin > 0.0);
+
+        // Exact counter -> Exact kind, zero margin.
+        struct ExactCounter;
+        impl TokenCounter for ExactCounter {
+            fn count(&self, t: &str) -> usize {
+                t.len()
+            }
+            fn is_exact(&self) -> bool {
+                true
+            }
+        }
+        let mut msgs2 = make_text_msgs(3, 10);
+        let report2 = enforce_budget(&mut msgs2, &budget, &ExactCounter, &pipeline, &policy, None)
+            .await
+            .unwrap();
+        assert_eq!(report2.count_kind, TokenCountKind::Exact);
+        assert_eq!(report2.safety_margin, 0.0);
+    }
+
+    /// A recent assistant reply pushed out of the default preserve window by
+    /// trailing tool messages is compressed by default, but kept raw when
+    /// `keep_recent_assistant` covers it. A separate large tool output supplies
+    /// the compressible bulk so the budget is met either way (no drop).
+    #[tokio::test]
+    async fn keep_recent_assistant_preserves_recent_assistant_raw() {
+        fn json_array(n: usize, needle_at: usize, needle: &str) -> String {
+            let items: Vec<serde_json::Value> = (0..n)
+                .map(|i| {
+                    let tag = if i == needle_at { needle } else { "aaaaa" };
+                    serde_json::json!({ "id": format!("{:03}", i), "tag": tag })
+                })
+                .collect();
+            serde_json::to_string(&items).expect("serialize")
+        }
+
+        // assistant (idx 2) sits 4 messages from the end — outside preserve=4.
+        let build = || {
+            vec![
+                Message::new("system", "sys"),
+                Message::new("tool", json_array(200, 100, "aaaaa")),
+                Message::new("assistant", json_array(60, 30, "zzzzz")),
+                Message::new("tool", "t3"),
+                Message::new("tool", "t4"),
+                Message::new("tool", "t5"),
+                Message::new("user", "latest"),
+            ]
+        };
+
+        let budget = ContextBudget {
+            total_limit: 800,
+            safety_margin: Some(0.0),
+        };
+        let counter = HeuristicCounter::new();
+        let pipeline = DefaultCompressionPipeline::with_builtin_compressors(
+            None,
+            crate::pipeline::DEFAULT_COMPRESSORS,
+        )
+        .expect("pipeline");
+        let policy = |keep: usize| AgentPolicy {
+            keep_recent_tool_results: 8,
+            clear_old_tool_results: false,
+            keep_recent_assistant: keep,
+            protected_tail_tokens: None,
+        };
+        let joined = |msgs: &[Message]| {
+            msgs.iter()
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let mut without = build();
+        enforce_budget(&mut without, &budget, &counter, &pipeline, &policy(0), None)
+            .await
+            .unwrap();
+        assert!(
+            !joined(&without).contains("zzzzz"),
+            "without keep_recent_assistant the recent assistant is compressed away"
+        );
+
+        let mut with = build();
+        enforce_budget(&mut with, &budget, &counter, &pipeline, &policy(1), None)
+            .await
+            .unwrap();
+        assert!(
+            joined(&with).contains("zzzzz"),
+            "keep_recent_assistant must preserve the recent assistant raw"
+        );
     }
 }

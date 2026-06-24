@@ -23,17 +23,33 @@
 //! ```
 //!
 //! **Conversation level** — agent-aware rules and token budgets over a
-//! whole message history. The canonical order is:
+//! whole message history. Most hosts use one of three unified entry
+//! points, each running the cascade and returning auditable records:
 //!
-//! 1. [`agent::apply_agent_compression`] — clear stale successful tool
-//!    results to retrievable CCR markers; never touch errors, system
-//!    prompts, or the latest user query.
-//! 2. [`budget::enforce_budget`] — escalate through compression,
-//!    summarization, and dropping until the history fits a token
-//!    budget, or fail closed with [`OghamError::BudgetExceeded`].
-//! 3. [`cache_aligner::align_messages`] +
-//!    [`cache_strategy::apply_cache_strategy`] — stabilize bytes and
-//!    annotate provider cache breakpoints.
+//! - [`compact_conversation`] — one-shot compaction of a flat
+//!   `Vec<Message>` → [`CompactResult`] (fold records, protected report,
+//!   budget/agent reports, cache plan, warnings).
+//! - [`compact_rich`] — the block-aware analogue over [`RichMessage`]s:
+//!   tool calls, images, and references stay structured instead of
+//!   flattened to a JSON string.
+//! - [`session::ContextSession`] — stateful, incremental compaction:
+//!   push turns, compact only the active tail, freeze already-folded
+//!   messages, with a searchable [`recall`] index over folded content.
+//!
+//! Under the hood the canonical pass order is
+//! [`agent::apply_agent_compression`] (clear stale successful tool
+//! results to retrievable CCR markers; never touch errors, system
+//! prompts, or the latest user query) → [`budget::enforce_budget`]
+//! (escalate through compression, summarization, and dropping until the
+//! history fits, or fail closed with [`OghamError::BudgetExceeded`]) →
+//! [`cache_aligner::align_messages`] +
+//! [`cache_strategy::apply_cache_strategy`] (stabilize bytes and annotate
+//! provider cache breakpoints). Compose them directly for full control.
+//!
+//! Folded content stays addressable: [`recall::RecallIndex`] is a
+//! deterministic BM25 index over it, and every [`FoldRecord`] carries
+//! typed [`fold_tags::FoldTags`] (tool names, error classes, file paths).
+//! Provider cache plans live in [`providers`].
 //!
 //! ## Guarantees
 //!
@@ -41,16 +57,27 @@
 //!   unchanged; oversized prompts return an error instead of being sent.
 //! - **Deterministic:** same input + config ⇒ byte-identical output.
 //! - **Reversible by default:** originals are stored in a [`ccr`] store
-//!   (in-memory, SQLite, or fjall) and retrievable via
-//!   `<<ccr:HASH>>` markers.
+//!   (in-memory by default; SQLite or fjall behind feature flags) and
+//!   retrievable via `<<ccr:HASH>>` markers.
 //! - **Honest token counting:** exact for OpenAI encodings with the
 //!   `tiktoken` feature; calibrated estimates with an explicit safety
 //!   margin otherwise (Claude tokenizers are not public).
 //!
 //! ## Feature flags
 //!
-//! - `tiktoken` — enables exact OpenAI token counts via
+//! The default build is lean: in-memory CCR only, no heavy embedded backends.
+//!
+//! - `ccr-sqlite` — persistent SQLite CCR store
+//!   (`ccr::sqlite::SqliteCcrStore`, pulls `rusqlite`). Required for
+//!   `CompressConfig::ccr_store_path`.
+//! - `ccr-fjall` — embedded-KV CCR store
+//!   (`ccr::fjall::FjallCcrStore`, pulls `fjall`).
+//! - `tiktoken` — exact OpenAI token counts via
 //!   `token_counter::TiktokenCounter` (adds the `tiktoken-rs` dependency).
+//!
+//! Add `features = ["ccr-sqlite"]` (and/or `"ccr-fjall"`) to depend on a
+//! persistent store. Through 0.3 these two were on by default; 0.4 removed them
+//! from the default set so the default dependency footprint is minimal.
 
 pub mod adaptive_sizer;
 pub mod agent;
@@ -58,12 +85,17 @@ pub mod budget;
 pub mod cache_aligner;
 pub mod cache_strategy;
 pub mod ccr;
+pub mod compact;
 pub mod compressors;
 pub mod conversation;
 pub mod detect;
+pub mod fold_tags;
 pub mod memory;
 pub mod pipeline;
 pub mod providers;
+pub mod recall;
+pub mod rich;
+pub mod session;
 pub mod stats_math;
 pub mod token_counter;
 pub mod token_est;
@@ -73,7 +105,7 @@ pub use ogham_core::*;
 pub use token_counter::{HeuristicCounter, counter_for_model};
 
 use crate::ccr::CcrStore;
-use crate::pipeline::DefaultCompressionPipeline;
+use crate::pipeline::{DEFAULT_COMPRESSORS, DefaultCompressionPipeline};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -95,14 +127,22 @@ impl Default for CompressConfig {
                 "smart_crusher".into(),
                 "ast_code".into(),
                 "log_stripper".into(),
+                "semantic".into(),
             ],
             ccr_store_path: None,
         }
     }
 }
 
-/// Build a pipeline with the built-in compressors enabled by `config`.
+/// Build a pipeline with the default built-in compressors and an in-memory CCR store.
 pub fn default_pipeline() -> DefaultCompressionPipeline {
+    let ccr_store = Arc::new(crate::ccr::in_memory::InMemoryCcrStore::new());
+    DefaultCompressionPipeline::with_builtin_compressors(Some(ccr_store), DEFAULT_COMPRESSORS)
+        .expect("static default compressor names must be valid")
+}
+
+/// Build an empty pipeline for tests or custom compressor registration.
+pub fn empty_pipeline() -> DefaultCompressionPipeline {
     DefaultCompressionPipeline::new(None, None)
 }
 
@@ -111,23 +151,61 @@ pub fn pipeline_with_ccr(ccr_store: Arc<dyn CcrStore>) -> DefaultCompressionPipe
     DefaultCompressionPipeline::with_ccr_store(ccr_store)
 }
 
+/// Open the persistent CCR store backing `ccr_store_path`.
+///
+/// Requires the `ccr-sqlite` feature; without it, a configured path is a
+/// typed error rather than a silent fallback.
+#[cfg(feature = "ccr-sqlite")]
+fn open_path_ccr_store(path: &std::path::Path) -> Result<Arc<dyn CcrStore>> {
+    Ok(Arc::new(
+        crate::ccr::sqlite::SqliteCcrStore::open(path, 300)
+            .map_err(|e| OghamError::StoreError(e.to_string()))?,
+    ) as Arc<dyn CcrStore>)
+}
+
+#[cfg(not(feature = "ccr-sqlite"))]
+fn open_path_ccr_store(path: &std::path::Path) -> Result<Arc<dyn CcrStore>> {
+    Err(OghamError::StoreError(format!(
+        "ccr_store_path ({}) requires the `ccr-sqlite` feature",
+        path.display()
+    )))
+}
+
 /// Convenience: compress a full message session in one call.
 pub async fn compress_messages(
     messages: Vec<Message>,
     config: CompressConfig,
 ) -> Result<CompressedMessages> {
-    let pipeline = if let Some(path) = &config.ccr_store_path {
-        let ccr_store = Arc::new(
-            crate::ccr::sqlite::SqliteCcrStore::open(path, 300)
-                .map_err(|e| OghamError::StoreError(e.to_string()))?,
-        );
-        DefaultCompressionPipeline::with_ccr_store(ccr_store)
+    let ccr_store = if config.reversible {
+        match &config.ccr_store_path {
+            Some(path) => Some(open_path_ccr_store(path)?),
+            None => {
+                Some(Arc::new(crate::ccr::in_memory::InMemoryCcrStore::new()) as Arc<dyn CcrStore>)
+            }
+        }
     } else {
-        let ccr_store = Arc::new(crate::ccr::in_memory::InMemoryCcrStore::new());
-        DefaultCompressionPipeline::with_ccr_store(ccr_store)
+        None
     };
+    let mut pipeline =
+        DefaultCompressionPipeline::with_builtin_compressors(ccr_store, &config.compressors)?
+            .with_reversible(config.reversible);
+    if config.use_cache_aligner {
+        pipeline = pipeline.with_align_cache();
+    }
     pipeline.run(&messages).await
 }
+
+pub use compact::{
+    CachePlan, CachePolicy, CcrPolicy, CompactConfig, CompactResult, CompressionPolicy, FoldKind,
+    FoldRecord, ProtectedReport, compact_conversation,
+};
+pub use fold_tags::{FoldTagKind, FoldTags, extract_fold_tags, extract_fold_tags_rich};
+pub use recall::{RecallHit, RecallIndex, extract_terms};
+pub use rich::{
+    CompactRichConfig, CompactRichResult, RichCompressionPolicy, compact_rich,
+    compress_rich_messages, restore_rich_message,
+};
+pub use session::{ContextSession, RetentionPolicy, SessionConfig, SessionStep};
 
 /// Detect the content type of a string.
 pub fn detect(content: &str) -> crate::detect::DetectionResult {

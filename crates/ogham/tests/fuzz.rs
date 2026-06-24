@@ -94,10 +94,9 @@ macro_rules! fuzz_compressor {
                             compressed.compressed_tokens
                         );
 
-                        // Best-effort CCR round-trip (fire-and-forget save
-                        // may need a moment; toon has no CCR store).
+                        // Best-effort CCR round-trip for compressors that expose
+                        // a top-level reversible id.
                         if !input.is_empty() && comp.name() != "toon" {
-                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                             let _ = comp.retrieve(&compressed.id).await; // must not panic
                         }
                     }

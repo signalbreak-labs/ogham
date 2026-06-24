@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use ogham_core::{
     CompressedMessages, CompressionContext, CompressionEvent, CompressionPipeline,
     CompressionStats, Compressor, Message, Metrics, NoopMetrics, NoopObserver, Observer,
-    PerCompressorStats, PipelineStats, Result,
+    OghamError, PerCompressorStats, PipelineStats, Result, meta_keys,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -15,6 +15,54 @@ use crate::compressors::{
     semantic::SemanticCompressor, smart_crusher::SmartCrusher, toon::ToonCompressor,
 };
 use crate::detect::{ContentType, detect_content_type};
+
+/// Conservative built-ins used by the public convenience API.
+pub const DEFAULT_COMPRESSORS: &[&str] = &["smart_crusher", "ast_code", "log_stripper", "semantic"];
+
+/// Every built-in compressor known to the default router.
+pub const ALL_BUILTIN_COMPRESSORS: &[&str] = &[
+    "smart_crusher",
+    "log_stripper",
+    "ast_code",
+    "semantic",
+    "dedup_ref",
+    "toon",
+];
+
+fn builtin_compressor(
+    name: &str,
+    ccr_store: Option<&Arc<dyn CcrStore>>,
+) -> Result<Arc<dyn Compressor>> {
+    let compressor: Arc<dyn Compressor> = match name {
+        "smart_crusher" => match ccr_store {
+            Some(store) => Arc::new(SmartCrusher::with_ccr_store(store.clone())),
+            None => Arc::new(SmartCrusher::new()),
+        },
+        "log_stripper" => match ccr_store {
+            Some(store) => Arc::new(LogStripper::with_ccr_store(store.clone())),
+            None => Arc::new(LogStripper::new()),
+        },
+        "ast_code" => match ccr_store {
+            Some(store) => Arc::new(AstCodeCompressor::with_ccr_store(store.clone())),
+            None => Arc::new(AstCodeCompressor::new()),
+        },
+        "semantic" => match ccr_store {
+            Some(store) => Arc::new(SemanticCompressor::with_ccr_store(store.clone())),
+            None => Arc::new(SemanticCompressor::new()),
+        },
+        "dedup_ref" => match ccr_store {
+            Some(store) => Arc::new(DedupRefCompressor::with_ccr_store(store.clone())),
+            None => Arc::new(DedupRefCompressor::new()),
+        },
+        "toon" => Arc::new(ToonCompressor::new()),
+        other => {
+            return Err(OghamError::UnsupportedContentType(format!(
+                "unknown compressor: {other}"
+            )));
+        }
+    };
+    Ok(compressor)
+}
 
 /// The default compression pipeline.
 ///
@@ -31,6 +79,10 @@ pub struct DefaultCompressionPipeline {
     metrics: Arc<dyn Metrics>,
     observer: Arc<dyn Observer>,
     align_cache: bool,
+    model: String,
+    question_hint: Option<String>,
+    max_tokens: Option<usize>,
+    reversible: bool,
 }
 
 impl DefaultCompressionPipeline {
@@ -41,22 +93,45 @@ impl DefaultCompressionPipeline {
             metrics: metrics.unwrap_or_else(|| Arc::new(NoopMetrics)),
             observer: observer.unwrap_or_else(|| Arc::new(NoopObserver)),
             align_cache: false,
+            model: "default".to_string(),
+            question_hint: None,
+            max_tokens: None,
+            reversible: false,
         }
     }
 
     pub fn with_ccr_store(ccr_store: Arc<dyn CcrStore>) -> Self {
         let mut pipeline = Self::new(None, None);
-        pipeline.ccr_store = Some(ccr_store.clone());
-        let compressors: Vec<Arc<dyn Compressor>> = vec![
-            Arc::new(SmartCrusher::with_ccr_store(ccr_store.clone())),
-            Arc::new(LogStripper::with_ccr_store(ccr_store.clone())),
-            Arc::new(AstCodeCompressor::with_ccr_store(ccr_store.clone())),
-            Arc::new(SemanticCompressor::with_ccr_store(ccr_store.clone())),
-            Arc::new(DedupRefCompressor::with_ccr_store(ccr_store.clone())),
-            Arc::new(ToonCompressor::new()),
-        ];
-        pipeline.compressors = Arc::new(std::sync::RwLock::new(compressors));
         pipeline
+            .set_builtin_compressors(Some(ccr_store), ALL_BUILTIN_COMPRESSORS)
+            .expect("static built-in compressor names must be valid");
+        pipeline
+    }
+
+    /// Build a pipeline containing exactly the requested built-in compressors.
+    pub fn with_builtin_compressors(
+        ccr_store: Option<Arc<dyn CcrStore>>,
+        compressors: &[impl AsRef<str>],
+    ) -> Result<Self> {
+        let mut pipeline = Self::new(None, None);
+        pipeline.set_builtin_compressors(ccr_store, compressors)?;
+        Ok(pipeline)
+    }
+
+    /// Replace the registered compressors with the requested built-ins.
+    pub fn set_builtin_compressors(
+        &mut self,
+        ccr_store: Option<Arc<dyn CcrStore>>,
+        compressors: &[impl AsRef<str>],
+    ) -> Result<()> {
+        let mut registered = Vec::with_capacity(compressors.len());
+        for name in compressors {
+            registered.push(builtin_compressor(name.as_ref(), ccr_store.as_ref())?);
+        }
+        self.reversible = ccr_store.is_some();
+        self.ccr_store = ccr_store;
+        self.compressors = Arc::new(std::sync::RwLock::new(registered));
+        Ok(())
     }
 
     /// Build a pipeline with all optional components.
@@ -67,6 +142,36 @@ impl DefaultCompressionPipeline {
     /// Enable KV-cache alignment (sort JSON keys, normalise whitespace).
     pub fn with_align_cache(mut self) -> Self {
         self.align_cache = true;
+        self
+    }
+
+    /// Configure the model name passed to compressors.
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = model.into();
+        self
+    }
+
+    /// Configure an optional focus/question hint passed to compressors via
+    /// [`ogham_core::CompressionContext::question_hint`].
+    ///
+    /// The hint is copied into every routed compressor's `CompressionContext`.
+    /// `SmartCrusher` uses it to bias which records survive sampling of large
+    /// JSON arrays; other built-in compressors currently ignore it. See
+    /// `ROADMAP.md` ("Consume the focus hint").
+    pub fn with_question_hint(mut self, question_hint: Option<String>) -> Self {
+        self.question_hint = question_hint;
+        self
+    }
+
+    /// Configure an optional per-message compression target passed to compressors.
+    pub fn with_max_tokens(mut self, max_tokens: Option<usize>) -> Self {
+        self.max_tokens = max_tokens;
+        self
+    }
+
+    /// Disable reversible writes even if the compressors were built with a CCR store.
+    pub fn with_reversible(mut self, reversible: bool) -> Self {
+        self.reversible = reversible && self.ccr_store.is_some();
         self
     }
 
@@ -90,7 +195,12 @@ impl DefaultCompressionPipeline {
         &self,
         msg: &Message,
         observer: &dyn Observer,
-    ) -> (String, Option<PerCompressorStats>, Option<String>) {
+    ) -> (
+        String,
+        Option<PerCompressorStats>,
+        Option<String>,
+        Option<String>,
+    ) {
         let content_str = &msg.content;
         let original_tokens = crate::token_est::count_tokens(content_str);
 
@@ -127,10 +237,10 @@ impl DefaultCompressionPipeline {
                     .record_routing_decision(detected.content_type.as_str(), comp.name());
 
                 let ctx = CompressionContext {
-                    model: "default".to_string(),
-                    question_hint: None,
-                    max_tokens: None,
-                    reversible: self.ccr_store.is_some(),
+                    model: self.model.clone(),
+                    question_hint: self.question_hint.clone(),
+                    max_tokens: self.max_tokens,
+                    reversible: self.reversible && self.ccr_store.is_some(),
                 };
                 let content = ogham_core::Content {
                     data: bytes::Bytes::from(content_str.clone().into_bytes()),
@@ -143,6 +253,8 @@ impl DefaultCompressionPipeline {
                         let latency_ms = start.elapsed().as_millis() as u64;
                         let compressed_tokens = compressed.compressed_tokens;
                         let out = String::from_utf8_lossy(&compressed.data).to_string();
+                        let ccr_id =
+                            (ctx.reversible && out != *content_str).then_some(compressed.id);
 
                         self.metrics.record_compress(
                             comp.name(),
@@ -170,7 +282,7 @@ impl DefaultCompressionPipeline {
                             },
                             latency_ms,
                         };
-                        (out, Some(stats), Some(comp.name().to_string()))
+                        (out, Some(stats), Some(comp.name().to_string()), ccr_id)
                     }
                     Err(e) => {
                         warn!(
@@ -182,17 +294,23 @@ impl DefaultCompressionPipeline {
                             stage: comp.name().to_string(),
                             message: e.to_string(),
                         });
-                        (content_str.clone(), None, None)
+                        (content_str.clone(), None, None, None)
                     }
                 }
             } else {
-                (content_str.clone(), None, None)
+                (content_str.clone(), None, None, None)
             }
         }
     }
 }
 
 impl Default for DefaultCompressionPipeline {
+    /// Returns an **empty** pipeline (no compressors, no CCR store), identical
+    /// to [`DefaultCompressionPipeline::new(None, None)`].
+    ///
+    /// This is intentionally the same as [`crate::empty_pipeline`]. For a
+    /// ready-to-use pipeline with the default built-in compressors and an
+    /// in-memory CCR store, call [`crate::default_pipeline`] instead.
     fn default() -> Self {
         Self::new(None, None)
     }
@@ -262,7 +380,7 @@ impl CompressionPipeline for DefaultCompressionPipeline {
         let mut per_compressor_stats: Vec<PerCompressorStats> = Vec::new();
 
         for msg in &working {
-            let (compressed_content, stats, _comp_name) =
+            let (compressed_content, stats, _comp_name, ccr_id) =
                 self.compress_one(msg, counting_observer.as_ref()).await;
 
             total_original += crate::token_est::count_tokens(&msg.content);
@@ -274,10 +392,14 @@ impl CompressionPipeline for DefaultCompressionPipeline {
                 total_compressed += crate::token_est::count_tokens(&msg.content);
             }
 
+            let mut metadata = msg.metadata.clone();
+            if let Some(ccr_id) = ccr_id {
+                metadata.insert(meta_keys::CCR_ID.to_string(), ccr_id);
+            }
             compressed_messages.push(Message {
                 role: msg.role.clone(),
                 content: compressed_content,
-                metadata: msg.metadata.clone(),
+                metadata,
             });
         }
 
@@ -361,16 +483,8 @@ impl PipelineBuilder {
 // Helper to reuse CCR store in builder
 impl DefaultCompressionPipeline {
     fn with_ccr_store_reuse(mut self, ccr_store: Arc<dyn CcrStore>) -> Self {
-        self.ccr_store = Some(ccr_store.clone());
-        let compressors: Vec<Arc<dyn Compressor>> = vec![
-            Arc::new(SmartCrusher::with_ccr_store(ccr_store.clone())),
-            Arc::new(LogStripper::with_ccr_store(ccr_store.clone())),
-            Arc::new(AstCodeCompressor::with_ccr_store(ccr_store.clone())),
-            Arc::new(SemanticCompressor::with_ccr_store(ccr_store.clone())),
-            Arc::new(DedupRefCompressor::with_ccr_store(ccr_store.clone())),
-            Arc::new(ToonCompressor::new()),
-        ];
-        self.compressors = Arc::new(std::sync::RwLock::new(compressors));
+        self.set_builtin_compressors(Some(ccr_store), ALL_BUILTIN_COMPRESSORS)
+            .expect("static built-in compressor names must be valid");
         self
     }
 }

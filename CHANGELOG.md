@@ -7,6 +7,249 @@ versions may contain breaking changes).
 
 ## [Unreleased]
 
+### Added
+
+- Native binary CCR payload storage in the persistent backends, for *binary*
+  payloads only. A UTF-8 `CcrPayload` keeps the self-describing text envelope
+  (no hex penalty, and readable by older binaries), while a binary payload (e.g.
+  an image) is stored natively — SQLite in `media_type`/`metadata` columns plus a
+  raw BLOB (added by an idempotent migration on open), fjall in a compact
+  length-prefixed frame whose magic begins with `0xFF` so it can never collide
+  with a UTF-8 `save` value — so binary costs its real size instead of a 2x hex
+  envelope. Reads fail closed: a binary payload fetched through the text
+  `retrieve()` API, a corrupt native frame, or a SQLite read/metadata error all
+  return `StoreError` rather than silently empty or lossy content.
+
+### Changed
+
+- `CachePolicy::Gemini` is now first-class in the integrated `CachePlan` instead
+  of emitting a generic plan plus a warning. The plan is content-keyed (no inline
+  `cache_control` breakpoints, matching Gemini's `CachedContent` model),
+  thresholded by `providers::gemini::MIN_CACHEABLE_PREFIX_TOKENS`, and carries
+  Gemini-specific notes (model-dependent minimums; refresh the `CachedContent`
+  when `content_key` changes). The misleading "generic stable-prefix plan only"
+  warning is gone. (`apply_cache_policy` dropped its now-unused `warnings`
+  parameter.)
+
+## [0.4.0] - 2026-06-23
+
+### Added
+
+- Richer Anthropic rendering: `providers::anthropic::render_cache_control_rich`
+  renders block-structured `RichMessage`s into native Anthropic content blocks
+  — `text`, `tool_use`, `tool_result` (with nested content rendered
+  recursively), and `image` (base64/url source) — instead of flattening to
+  text. Tool results land in a `user` turn (per the Messages API); `system`
+  splits to the top-level field; `cache_control` breakpoints land on a
+  message's last block. `Thinking`/`Reference` blocks (no native input shape)
+  render as text so their content still reaches the model. Adds
+  `min_cacheable_prefix_tokens(model)` for per-model Anthropic cache thresholds
+  (a documented, versioned table — e.g. Haiku 4.5 = 4096, Opus 4.8 = 1024,
+  Opus 4.5/4.6 = 4096 — defaulting to 1024 for unknown models).
+- Focus-hint steering across all built-in compressors. Previously only
+  `SmartCrusher` consumed `CompactConfig.focus`; now `LogStripper`,
+  `AstCodeCompressor`, and `SemanticCompressor` do too, via the shared
+  `compressors::focus` module. `LogStripper` retains log lines matching the
+  hint (scored below every diagnostic tier, so focus never evicts an
+  error/warning/summary), `AstCodeCompressor` keeps matching code lines at full
+  length instead of truncating them, and `SemanticCompressor` keeps matching
+  paragraphs full and un-deduplicated. Hints are stopword-filtered and
+  deduplicated so a natural question ("what is the error") doesn't mark
+  everything relevant; an empty/noise-only hint is byte-identical to the no-hint
+  path. (Also hardened: the code/semantic truncation now slices on a UTF-8 char
+  boundary, fixing a latent multibyte panic.)
+- Structured fold tags (`ogham::fold_tags`): every `FoldRecord` now carries a
+  deterministic `FoldTags { tool_names, error_classes, file_paths }`, extracted
+  offline during compaction from the fold's original messages (tool names from
+  `metadata[TOOL_NAME]`, error classes from the same patterns the agent cascade
+  uses — a parity test guards drift — and a conservative file-path scan). This
+  adds the typed-field axis to recall: `RecallHit` carries the tags and
+  `RecallIndex::find_by_tag(FoldTagKind, value)` returns folds by tool/error/path
+  (case-insensitive) without a free-text query, so a host can ask "all folds from
+  the `shell` tool" or "all folds with a `panic`". `ContextSession` indexes tags
+  automatically. `extract_fold_tags_rich` adds rich-native signals (tool-call
+  names, errored tool results) the flat projection loses. Extraction is bounded
+  (per-message path scan, raw-candidate, and per-kind caps) so oversized content
+  can't amplify into the tag set. Re-exports `FoldTags`, `FoldTagKind`,
+  `extract_fold_tags`, `extract_fold_tags_rich`.
+- Searchable fold recall (`ogham::recall`): a deterministic BM25 keyword index
+  over folded content, addressable by CCR id. Reversible CCR is exact-id-only —
+  you can retrieve an original only if you still hold its `<<ccr:HASH>>` marker —
+  so `RecallIndex` lets a host (or agent) `search()` folded content by relevance
+  to recover the ids to `retrieve()`. It is pure and deterministic (no
+  embeddings, no network); `extract_terms` splits path-like and identifier-like
+  tokens (`src/auth/login.rs` also matches `auth`/`login`/`rs`; `parseToolResult`
+  also matches `parse`/`tool`/`result`). `ContextSession` maintains one
+  automatically — each compaction indexes the original text of newly folded
+  content under its CCR id and drops entries whose originals are
+  garbage-collected — exposed via `ContextSession::recall()`. Re-exports
+  `RecallHit`, `RecallIndex`, and `extract_terms`.
+- Durable CCR retention and stub-eviction: `InMemoryCcrStore::unbounded()` is a
+  non-evicting store (so a referenced original is never silently dropped by
+  capacity/TTL); `ccr::referenced_ccr_ids()` collects the CCR ids a message list
+  still references (markers + metadata); and `ContextSession` gains a
+  `RetentionPolicy` (`KeepAll` default, or `EvictFinalized { max_finalized,
+  evict_originals }`) that bounds finalized-stub growth and garbage-collects the
+  CCR originals of evicted stubs — never one a live marker still references.
+  `SessionStep` gains an `evicted` field listing the GC'd ids.
+- `ContextSession` (`ogham::session`): stateful, incremental conversation
+  compaction. `push()` appends turns; `compact()` folds only the active tail and
+  freezes already-folded messages (marked finalized + pinned), so each turn does
+  work proportional to new content instead of recompacting the whole history.
+  The fold ledger is append-only (stable undo/UI references) and the finalized
+  region is byte-stable (preserves provider prompt-cache reuse). Adds
+  `SessionConfig` and `SessionStep`.
+- Honest token-count provenance: `TokenCountKind`
+  (`Exact` / `Estimated { method, safety_margin }` / `ProviderReported`) and a
+  `TokenCounter::count_kind()` default method, so a counter declares how its
+  counts are produced. `HeuristicCounter` and the tiktoken counter report their
+  method and recommended safety margin.
+- `compact_rich()` plus `CompactRichConfig`/`CompactRichResult`: the block-aware
+  analogue of `compact_conversation()`. It runs block-aware text compression and
+  then the agent/budget cascade over `Vec<RichMessage>`, returning
+  structure-preserving output — messages the cascade keeps retain their tool ids
+  and non-text blocks; messages it folds become reversible flat text — plus fold
+  records, protected-tail evidence, optional budget/agent reports, and a cache
+  plan. Kept block-compressed messages restore to exact blocks via
+  `restore_rich_message`.
+- `ogham::rich`: block-aware compression. `compress_rich_messages()` compresses
+  the bulky text *inside* `RichMessage` blocks (routing each text payload through
+  the content-type compressors) while preserving tool-call ids, non-text blocks
+  (images/references), error tool results, and roles — so a host never flattens
+  structured content to a JSON string. Reversibility is message-level: each
+  rewritten message's original blocks are stored as a `CcrPayload` and tagged
+  with `meta_keys::CCR_ID`, and `restore_rich_message()` returns the exact
+  original. Saves are awaited and fail closed.
+- Block-aware CCR payloads: `ccr::CcrPayload` (media type + bytes + metadata)
+  with `CcrStore::save_payload` / `retrieve_payload` default methods, so every
+  store can persist and restore exact structured originals (e.g. serialized
+  `RichMessage` blocks) for lossless undo. The default impl wraps the payload in
+  a self-describing envelope over the text store (UTF-8 verbatim, binary
+  hex-encoded); `retrieve_payload` degrades a plain string, including JSON that
+  merely collides with the envelope marker key, to a `text/plain` payload.
+- `ogham_core::content`: a host-neutral rich message model — `RichMessage`,
+  `MessageContent` (text or blocks), and `ContentBlock`
+  (text/thinking/image/tool-use/tool-result/reference). It round-trips
+  losslessly through serde, so a host can map its structured messages in without
+  flattening to a JSON string. `RichMessage::to_flat_lossy()` renders blocks to
+  text for the text pipeline and marks the result with `META_FLATTENED` so the
+  lossy path is explicit. Re-exported from `ogham`.
+- Provider cache planning across `providers`:
+  - `providers::openai` — `stable_prefix_report()` reports the cacheable
+    stable-prefix boundary, whether it clears OpenAI's ~1024-token auto-cache
+    threshold, and a deterministic `prompt_cache_key()` (no invented request
+    fields; OpenAI caching is automatic).
+  - `providers::gemini` — `cache_candidate()` reports the explicit-cache
+    candidate prefix span, token estimate, and a deterministic `content_id` to
+    detect when a Gemini `CachedContent` must be refreshed.
+  - `providers::anthropic::render_cache_control()` renders messages into the
+    Anthropic `system`/`messages` request parts, attaching
+    `cache_control: ephemeral` to annotated blocks.
+  - `providers::content_key()` — shared deterministic content identity for a
+    message span.
+  All are advisory pure data-structure builders; Ogham never calls a provider.
+- `compact_conversation()` plus `CompactConfig`/`CompactResult` and the
+  `FoldRecord`, `FoldKind`, `ProtectedReport`, `CachePlan`, `CompressionPolicy`,
+  `CcrPolicy`, and `CachePolicy` types: a high-level conversation compaction API
+  that returns auditable fold records (cleared/compressed/summarized/dropped),
+  a protected-tail report, optional budget/agent reports, provider cache
+  annotations, and warnings — so hosts no longer scrape `<<ccr:...>>` markers.
+- `ogham::empty_pipeline()` and
+  `DefaultCompressionPipeline::with_builtin_compressors()` for explicit,
+  allowlist-driven pipeline construction.
+
+### Fixed
+
+- `render_cache_control_rich` now coalesces rendered same-role turns after
+  skipping empty rich segments, preserving Anthropic role alternation and keeping
+  any cache breakpoint on the stable block instead of moving it past volatile
+  content.
+- `RecallIndex` now merges structured tags when repeated identical folds share a
+  CCR id, so tag queries remain valid for every observed fold-level tool/error/
+  path tag while the index still stores one retrievable original per CCR id.
+
+### Changed
+
+- **BREAKING (0.4):** the `ccr-sqlite` and `ccr-fjall` features are no longer in
+  the default set, so the default `ogham` build is lean — in-memory CCR only, no
+  `rusqlite`/`fjall`. A consumer that uses `CompressConfig::ccr_store_path`, or
+  `ccr::sqlite::SqliteCcrStore` / `ccr::fjall::FjallCcrStore` directly, must now
+  add `features = ["ccr-sqlite"]` (and/or `"ccr-fjall"`) to its `ogham`
+  dependency. In-memory CCR and all compaction/recall/provider APIs are
+  unaffected. `ogham-server` enables both features, so its behavior is unchanged.
+  A CI guard asserts the default dependency tree stays free of the heavy
+  backends.
+- Conversation compression now fully honors the `PINNED` contract: a message
+  marked `meta_keys::PINNED` is never rewritten — not by middle-band compression
+  and not by the old-band summary/drop (previously only clearing and budget-drop
+  respected it, so a pinned message could be compressed or summarized, and in a
+  session a finalized summary stub could be recursively re-summarized).
+- A tool result that is cleared and then dropped within the same budget pass now
+  keeps its CCR id in the `Dropped` `FoldRecord` (the cascade threads the dropped
+  stub through to fold-record building; `BudgetReport` gains a `dropped` field),
+  so the audit pointer to the stored original is no longer orphaned.
+- Dropped fold records keep CCR provenance without counting removed stubs as
+  emitted replacement tokens, and `ContextSession` disambiguates repeated
+  content-addressed fold ids so its append-only ledger has stable unique event
+  references.
+- `compact_rich` now runs the agent/budget cascade on the verbatim conversation
+  FIRST and block-compresses only the kept, non-protected messages afterward.
+  This fixes two correctness bugs found by audit: (1) the cascade no longer
+  clears/recompresses already-compressed content, so a cleared/folded message's
+  CCR id and fold record resolve to the exact verbatim original (previously they
+  resolved to a lossy projection and `restore_rich_message` could orphan the
+  real payload); (2) `compact_rich` now recounts the true size of the emitted
+  rich output (counting opaque image/tool-input block bytes the flat projection
+  hides) and fails closed with `BudgetExceeded`, instead of returning an
+  over-budget payload while reporting that it fit.
+- `BudgetReport` now carries `count_kind` and the `safety_margin` actually
+  applied, so a report never presents an estimate as exact. The budget cascade
+  derives its margin from the counter's `count_kind` (behavior-preserving: exact
+  counts use `0.0`, estimates use the counter's declared margin, e.g. `0.05`).
+- `CompactResult.cache_plan` (`CachePlan`) now reports stable-prefix accounting:
+  `stable_prefix_messages`, `stable_prefix_tokens`, `cacheable`, a content-keyed
+  `content_key` (set for OpenAI/Gemini/Generic, `None` for Anthropic), and
+  `notes`. `CachePolicy::None` reports no stable prefix and clears stale cache
+  annotations, while Anthropic planning replaces old breakpoint annotations
+  instead of accumulating them. (Additive fields on a returned struct.)
+- The heavy embedded CCR stores are now feature-gated: `ccr-sqlite` (`rusqlite`)
+  and `ccr-fjall` (`fjall`). Both remain in the default feature set, so existing
+  builds are unchanged; `cargo build --no-default-features` now yields a lean,
+  in-memory-only dependency set that excludes `rusqlite` and `fjall`. Calling
+  `compress_messages` with `ccr_store_path` set without `ccr-sqlite` returns a
+  typed `StoreError` instead of failing to compile. The unused `aho-corasick`
+  dependency was dropped.
+- `AgentPolicy::keep_recent_assistant` is now enforced: under budget pressure the
+  compression cascade preserves at least the span covering the most-recent N
+  assistant replies, keeping them raw instead of compressing them in the middle
+  band. Previously the field was accepted but ignored.
+- CCR content addresses (`ccr::compute_key`) are now versioned, collision-resistant
+  BLAKE3 keys of the form `b3:<32 hex>` instead of bare MD5. The `b3:` tag lets the
+  hash scheme evolve unambiguously; stores key on the literal id, so content saved
+  under an older scheme stays retrievable. Emitted `<<ccr:...>>` markers change
+  accordingly.
+- The focus / question hint (`CompactConfig.focus`,
+  `DefaultCompressionPipeline::with_question_hint()`) is now consumed:
+  `SmartCrusher` boosts records whose serialized form matches the hint so they
+  survive sampling of large JSON arrays, end to end through `compact_conversation`
+  and the budget cascade. An empty hint leaves output unchanged, and protected
+  content (system prompts, errors, latest user query, protected tail) is never
+  overridden. Other built-in compressors still ignore the hint.
+- `ogham::default_pipeline()` now registers the default built-in compressors
+  with an in-memory CCR store instead of returning an empty pipeline. Use
+  `ogham::empty_pipeline()` (or `DefaultCompressionPipeline::default()`) for the
+  previous empty behavior.
+- `compress_messages()` now honors every `CompressConfig` field: `reversible`
+  (suppresses CCR construction and `<<ccr:...>>` markers when false),
+  `use_cache_aligner`, the `compressors` allowlist, and `ccr_store_path`
+  (opened only when `reversible` is true).
+- Compressor CCR saves are now awaited and fail-closed: a save error keeps the
+  original message content instead of being silently dropped by a detached
+  `tokio::spawn`.
+- Reversible pipeline compression now annotates rewritten messages with
+  `metadata["ogham.ccr_id"]`, giving `FoldRecord::ccr_id` a durable top-level
+  restore key even when compressed text has no embedded CCR marker.
+
 ## [0.3.0] - 2026-06-12
 
 ### Added
@@ -111,7 +354,8 @@ Design substantially derived from
 [Headroom](https://github.com/chopratejas/headroom) (Apache-2.0) — see
 [NOTICE](NOTICE).
 
-[Unreleased]: https://github.com/signalbreak-labs/ogham/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/signalbreak-labs/ogham/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/signalbreak-labs/ogham/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/signalbreak-labs/ogham/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/signalbreak-labs/ogham/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/signalbreak-labs/ogham/compare/v0.2.0...v0.2.1

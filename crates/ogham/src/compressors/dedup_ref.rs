@@ -12,6 +12,11 @@ pub struct DedupRefCompressor {
     ccr_store: Option<std::sync::Arc<dyn CcrStore>>,
 }
 
+struct DedupOutput {
+    compressed: String,
+    ccr_saves: Vec<(String, String)>,
+}
+
 impl DedupRefCompressor {
     pub fn new() -> Self {
         Self {
@@ -28,8 +33,13 @@ impl DedupRefCompressor {
     }
 
     pub fn compress(&self, text: &str) -> String {
+        self.compress_internal(text, false).compressed
+    }
+
+    fn compress_internal(&self, text: &str, emit_markers: bool) -> DedupOutput {
         let mut out = String::new();
         let mut total_saved = 0usize;
+        let mut ccr_saves = Vec::new();
         for para in text.split("\n\n") {
             let trimmed = para.trim();
             if trimmed.is_empty() {
@@ -50,12 +60,12 @@ impl DedupRefCompressor {
                 }
                 drop(seen);
                 total_saved += trimmed.len();
-                if total_saved > 100 {
-                    // Emit a reference marker
+                if emit_markers && total_saved > 100 {
                     if !out.is_empty() {
                         out.push('\n');
                     }
                     out.push_str(&marker_for(&hash));
+                    ccr_saves.push((hash, trimmed.to_string()));
                 }
             } else {
                 seen.insert(hash.clone(), trimmed.to_string());
@@ -72,7 +82,10 @@ impl DedupRefCompressor {
                 total_saved
             ));
         }
-        out
+        DedupOutput {
+            compressed: out,
+            ccr_saves,
+        }
     }
 }
 
@@ -94,22 +107,21 @@ impl Compressor for DedupRefCompressor {
             content.data.len()
         );
         let text = String::from_utf8_lossy(&content.data);
-        let compressed = self.compress(&text);
-        let compressed_tokens = compressed.len() / 4;
         let id = compute_key(content.data.as_ref());
+        let emit_markers = ctx.reversible && self.ccr_store.is_some();
+        let output = self.compress_internal(&text, emit_markers);
+        let compressed_tokens = output.compressed.len() / 4;
         if ctx.reversible
             && let Some(store) = &self.ccr_store
         {
-            let store_ref = store.clone();
-            let id_clone = id.clone();
-            let text_clone = text.to_string();
-            tokio::spawn(async move {
-                let _ = store_ref.save(&id_clone, &text_clone, None).await;
-            });
+            for (block_id, block_original) in &output.ccr_saves {
+                store.save(block_id, block_original, None).await?;
+            }
+            store.save(&id, &text, None).await?;
         }
         Ok(Compressed {
             id,
-            data: bytes::Bytes::from(compressed),
+            data: bytes::Bytes::from(output.compressed),
             original_tokens: text.len() / 4,
             compressed_tokens,
         })

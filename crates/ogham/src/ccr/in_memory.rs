@@ -6,10 +6,18 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// In-memory CCR store backed by a mutex-protected HashMap.
+///
+/// By default it bounds memory with a capacity (LRU-style eviction) and a TTL.
+/// For durable reversibility — where an original must never disappear while a
+/// live `<<ccr:...>>` marker still references it — construct it with
+/// [`InMemoryCcrStore::unbounded`] and manage lifecycle explicitly (e.g. via
+/// `ContextSession` retention or `delete`).
 pub struct InMemoryCcrStore {
     map: Mutex<HashMap<String, Entry>>,
-    ttl: Duration,
-    capacity: usize,
+    /// Entry lifetime; `None` never expires.
+    ttl: Option<Duration>,
+    /// Maximum entries before oldest-eviction; `None` is unbounded.
+    capacity: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -25,9 +33,20 @@ impl InMemoryCcrStore {
 
     pub fn with_capacity_and_ttl(capacity: usize, ttl: Duration) -> Self {
         Self {
-            map: Mutex::new(HashMap::with_capacity(capacity)),
-            ttl,
-            capacity,
+            map: Mutex::new(HashMap::with_capacity(capacity.min(1024))),
+            ttl: Some(ttl),
+            capacity: Some(capacity),
+        }
+    }
+
+    /// A non-evicting store: no capacity cap and no TTL, so a stored original is
+    /// never silently dropped. Use this for durable sessions and delete entries
+    /// explicitly (or let `ContextSession` retention garbage-collect them).
+    pub fn unbounded() -> Self {
+        Self {
+            map: Mutex::new(HashMap::new()),
+            ttl: None,
+            capacity: None,
         }
     }
 }
@@ -39,13 +58,17 @@ impl Default for InMemoryCcrStore {
 }
 
 impl InMemoryCcrStore {
-    /// Return a snapshot of all stored entries.
+    /// Return a snapshot of all live stored entries.
     pub fn get_all(&self) -> Vec<(String, String)> {
         let map = self.map.lock().unwrap();
         map.iter()
-            .filter(|(_, e)| e.inserted.elapsed() <= self.ttl)
+            .filter(|(_, e)| !self.is_expired(e))
             .map(|(k, e)| (k.clone(), e.payload.clone()))
             .collect()
+    }
+
+    fn is_expired(&self, entry: &Entry) -> bool {
+        self.ttl.is_some_and(|ttl| entry.inserted.elapsed() > ttl)
     }
 }
 
@@ -53,8 +76,11 @@ impl InMemoryCcrStore {
 impl CcrStore for InMemoryCcrStore {
     async fn save(&self, id: &str, original: &str, _metadata: Option<&str>) -> Result<()> {
         let mut map = self.map.lock().unwrap();
-        // Evict oldest if at capacity.
-        if map.len() >= self.capacity && !map.contains_key(id) {
+        // Evict the oldest entry if a capacity cap is set and reached.
+        if let Some(capacity) = self.capacity
+            && map.len() >= capacity
+            && !map.contains_key(id)
+        {
             let oldest = map
                 .iter()
                 .min_by_key(|(_, e)| e.inserted)
@@ -76,7 +102,7 @@ impl CcrStore for InMemoryCcrStore {
     async fn retrieve(&self, id: &str) -> Result<Option<String>> {
         let mut map = self.map.lock().unwrap();
         if let Some(entry) = map.get(id) {
-            if entry.inserted.elapsed() <= self.ttl {
+            if !self.is_expired(entry) {
                 return Ok(Some(entry.payload.clone()));
             }
             map.remove(id);
@@ -104,6 +130,26 @@ mod tests {
                 store.retrieve("abc").await.unwrap(),
                 Some("payload".to_string())
             );
+        });
+    }
+
+    #[test]
+    fn unbounded_never_evicts() {
+        let store = InMemoryCcrStore::unbounded();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            for i in 0..2_000 {
+                store
+                    .save(&format!("id{i}"), &format!("payload{i}"), None)
+                    .await
+                    .unwrap();
+            }
+            // The very first entry survives 2000 inserts (no capacity cap, no TTL).
+            assert_eq!(
+                store.retrieve("id0").await.unwrap(),
+                Some("payload0".to_string())
+            );
+            assert_eq!(store.get_all().len(), 2_000);
         });
     }
 
