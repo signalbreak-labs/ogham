@@ -108,19 +108,27 @@ The safety and honesty foundation is in place:
   cascade and returns the same audit records (fold records, protected report,
   cache plan) as `compact_conversation`, with structure preserved for kept
   messages and reversible flat text for folded ones.
-- **Block-aware CCR payloads.** Shipped: `ccr::CcrPayload` plus
-  `CcrStore::save_payload` / `retrieve_payload` (default methods over the
-  existing text store), so a host can store and restore exact structured
-  originals. Remaining: native binary columns in the SQLite/fjall backends to
-  avoid the envelope's hex overhead for large binary payloads.
+- **Block-aware CCR payloads.** Done. `ccr::CcrPayload` plus
+  `CcrStore::save_payload` / `retrieve_payload` let a host store and restore
+  exact structured originals; the in-memory store uses a self-describing text
+  envelope, while the SQLite backend stores payloads in native BLOB +
+  media-type/metadata columns and the fjall backend in a compact
+  length-prefixed binary frame — no hex envelope, so large binary payloads cost
+  their real size. Both native backends fall back to the shared text decoder for
+  plain `save`s and legacy envelopes, so existing stores keep working
+  (a re-open runs an idempotent column migration).
 - **Provider cache planning.** Shipped: OpenAI stable-prefix reports
   (`providers::openai`), Gemini cache candidates (`providers::gemini`), an
   Anthropic `cache_control` request renderer (`providers::anthropic`), and
   stable-prefix accounting folded into `CompactResult`'s `CachePlan`.
-  `render_cache_control_rich` now renders native Anthropic tool-use /
-  tool-result / image blocks from the rich content model (no flattening), and
+  `render_cache_control_rich` renders native Anthropic tool-use / tool-result /
+  image blocks from the rich content model (no flattening), and
   `min_cacheable_prefix_tokens(model)` gives per-model Anthropic cache
-  thresholds. Ogham emits plans — hosts own the HTTP calls and auth.
+  thresholds. `CachePolicy::Gemini` is now first-class in the integrated
+  `CachePlan`: content-keyed (no inline breakpoints — matching Gemini's
+  `CachedContent` model), thresholded by `gemini::MIN_CACHEABLE_PREFIX_TOKENS`,
+  and annotated with refresh guidance, rather than emitting a generic plan with
+  a warning. Ogham emits plans — hosts own the HTTP calls and auth.
 - **Token-counter reporting.** Done. `TokenCountKind` distinguishes `Exact`,
   `Estimated { method, safety_margin }`, and `ProviderReported`; `count_kind()`
   reports it per counter; `BudgetReport` surfaces the count kind and applied

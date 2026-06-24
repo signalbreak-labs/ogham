@@ -7,6 +7,27 @@ versions may contain breaking changes).
 
 ## [Unreleased]
 
+### Added
+
+- Native binary CCR payload storage in the persistent backends. The SQLite store
+  now keeps a `CcrPayload` in native BLOB + `media_type`/`metadata` columns
+  (added by an idempotent migration on open), and the fjall store in a compact
+  length-prefixed binary frame — so binary payloads (e.g. images) cost their
+  real size instead of the previous hex-encoded text envelope. Both fall back to
+  the shared text decoder for plain `save`s and legacy envelopes, so existing
+  databases keep working unchanged.
+
+### Changed
+
+- `CachePolicy::Gemini` is now first-class in the integrated `CachePlan` instead
+  of emitting a generic plan plus a warning. The plan is content-keyed (no inline
+  `cache_control` breakpoints, matching Gemini's `CachedContent` model),
+  thresholded by `providers::gemini::MIN_CACHEABLE_PREFIX_TOKENS`, and carries
+  Gemini-specific notes (model-dependent minimums; refresh the `CachedContent`
+  when `content_key` changes). The misleading "generic stable-prefix plan only"
+  warning is gone. (`apply_cache_policy` dropped its now-unused `warnings`
+  parameter.)
+
 ## [0.4.0] - 2026-06-23
 
 ### Added

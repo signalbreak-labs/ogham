@@ -209,13 +209,11 @@ impl ContextSession {
 
         let model = self.config.model.as_deref().unwrap_or("default");
         let counter = counter_for_model(model);
-        let mut warnings = Vec::new();
         let cache_plan = apply_cache_policy(
             &mut next_messages,
             self.config.cache,
             model,
             counter.as_ref(),
-            &mut warnings,
         );
         let tokens = counter.count_messages(&next_messages);
 

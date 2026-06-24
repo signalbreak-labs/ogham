@@ -1,4 +1,4 @@
-use super::CcrStore;
+use super::{CcrPayload, CcrStore};
 use async_trait::async_trait;
 use ogham_core::Result;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -28,6 +28,13 @@ impl SqliteCcrStore {
              )",
             [],
         )?;
+        // Native typed-payload columns. Added by migration so a database created
+        // before payload support gains them; the `original` BLOB then holds raw
+        // payload bytes (no hex envelope). NULL `media_type` marks a plain text
+        // `save` (or a legacy envelope), which retrieves via the text decoder.
+        // Errors here are the benign "duplicate column name" on re-open.
+        let _ = conn.execute("ALTER TABLE ccr_entries ADD COLUMN media_type TEXT", []);
+        let _ = conn.execute("ALTER TABLE ccr_entries ADD COLUMN metadata TEXT", []);
         Ok(Self {
             conn: Mutex::new(conn),
             default_ttl_seconds,
@@ -49,10 +56,12 @@ impl CcrStore for SqliteCcrStore {
         let now = Self::now_unix_seconds();
         let conn = self.conn.lock().unwrap();
         let res = conn.execute(
-            "INSERT INTO ccr_entries (hash, original, created_at, ttl_seconds)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO ccr_entries (hash, original, media_type, metadata, created_at, ttl_seconds)
+             VALUES (?1, ?2, NULL, NULL, ?3, ?4)
              ON CONFLICT(hash) DO UPDATE SET
                  original    = excluded.original,
+                 media_type  = NULL,
+                 metadata    = NULL,
                  created_at  = excluded.created_at,
                  ttl_seconds = excluded.ttl_seconds",
             params![
@@ -93,5 +102,159 @@ impl CcrStore for SqliteCcrStore {
         let conn = self.conn.lock().unwrap();
         let _ = conn.execute("DELETE FROM ccr_entries WHERE hash = ?1", params![id]);
         Ok(())
+    }
+
+    /// Store a typed payload natively: raw bytes in the `original` BLOB plus the
+    /// media type and metadata columns — no hex envelope, so binary payloads cost
+    /// their real size.
+    async fn save_payload(&self, id: &str, payload: &CcrPayload) -> Result<()> {
+        let now = Self::now_unix_seconds();
+        let metadata_json =
+            serde_json::to_string(&payload.metadata).unwrap_or_else(|_| "{}".to_string());
+        let conn = self.conn.lock().unwrap();
+        let res = conn.execute(
+            "INSERT INTO ccr_entries (hash, original, media_type, metadata, created_at, ttl_seconds)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(hash) DO UPDATE SET
+                 original    = excluded.original,
+                 media_type  = excluded.media_type,
+                 metadata    = excluded.metadata,
+                 created_at  = excluded.created_at,
+                 ttl_seconds = excluded.ttl_seconds",
+            params![
+                id,
+                payload.bytes,
+                payload.media_type,
+                metadata_json,
+                now as i64,
+                self.default_ttl_seconds as i64
+            ],
+        );
+        if let Err(err) = res {
+            tracing::warn!(hash = %id, error = %err, "ccr_sqlite_save_payload_failed");
+        }
+        Ok(())
+    }
+
+    async fn retrieve_payload(&self, id: &str) -> Result<Option<CcrPayload>> {
+        let now = Self::now_unix_seconds();
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute(
+            "DELETE FROM ccr_entries WHERE created_at + ttl_seconds <= ?1",
+            params![now as i64],
+        );
+        let row: Option<(Vec<u8>, Option<String>, Option<String>)> = conn
+            .query_row(
+                "SELECT original, media_type, metadata FROM ccr_entries
+                 WHERE hash = ?1 AND created_at + ttl_seconds > ?2",
+                params![id, now as i64],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .unwrap_or_else(|err| {
+                tracing::warn!(hash = %id, error = %err, "ccr_sqlite_get_payload_failed");
+                None
+            });
+        Ok(row.map(|(bytes, media_type, metadata)| match media_type {
+            // A native payload: reconstruct from the raw bytes + columns.
+            Some(media_type) => CcrPayload {
+                media_type,
+                bytes,
+                metadata: metadata
+                    .and_then(|m| serde_json::from_str(&m).ok())
+                    .unwrap_or_default(),
+            },
+            // No media type: a plain `save` or a legacy text envelope — degrade
+            // through the shared text decoder.
+            None => super::decode_payload(&String::from_utf8_lossy(&bytes)),
+        }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// A unique temp path; the returned guard removes the db (and WAL/SHM
+    /// sidecars) on drop.
+    struct TempDb(PathBuf);
+    impl TempDb {
+        fn new() -> Self {
+            static N: AtomicU64 = AtomicU64::new(0);
+            let n = N.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir()
+                .join(format!("ogham_ccr_sqlite_{}_{n}.db", std::process::id()));
+            Self(path)
+        }
+    }
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            for suffix in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(format!("{}{suffix}", self.0.display()));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn payload_round_trips_native_text_and_binary() {
+        let db = TempDb::new();
+        let store = SqliteCcrStore::open(&db.0, 300).unwrap();
+
+        let mut metadata = HashMap::new();
+        metadata.insert("origin".to_string(), "tool".to_string());
+        let text = CcrPayload {
+            media_type: "application/json".to_string(),
+            bytes: br#"{"a":1}"#.to_vec(),
+            metadata,
+        };
+        store.save_payload("t", &text).await.unwrap();
+        assert_eq!(
+            store.retrieve_payload("t").await.unwrap().as_ref(),
+            Some(&text)
+        );
+
+        // Binary survives natively (no hex envelope).
+        let binary = CcrPayload {
+            media_type: "application/octet-stream".to_string(),
+            bytes: vec![0xff, 0xfe, 0x00, 0x80],
+            metadata: HashMap::new(),
+        };
+        store.save_payload("b", &binary).await.unwrap();
+        assert_eq!(
+            store.retrieve_payload("b").await.unwrap().as_ref(),
+            Some(&binary)
+        );
+    }
+
+    #[tokio::test]
+    async fn retrieve_payload_on_plain_save_is_text() {
+        let db = TempDb::new();
+        let store = SqliteCcrStore::open(&db.0, 300).unwrap();
+        store.save("p", "just text", None).await.unwrap();
+        let payload = store.retrieve_payload("p").await.unwrap().unwrap();
+        assert_eq!(payload.bytes, b"just text");
+        assert!(payload.media_type.starts_with("text/plain"));
+    }
+
+    #[tokio::test]
+    async fn reopen_migrates_and_preserves_payload() {
+        let db = TempDb::new();
+        let payload = CcrPayload {
+            media_type: "image/png".to_string(),
+            bytes: vec![0x89, 0x50, 0x4e, 0x47, 0x00, 0xff],
+            metadata: HashMap::new(),
+        };
+        {
+            let store = SqliteCcrStore::open(&db.0, 300).unwrap();
+            store.save_payload("m", &payload).await.unwrap();
+        }
+        // Reopening runs the migration again (idempotent) and the data persists.
+        let store = SqliteCcrStore::open(&db.0, 300).unwrap();
+        assert_eq!(
+            store.retrieve_payload("m").await.unwrap().as_ref(),
+            Some(&payload)
+        );
     }
 }

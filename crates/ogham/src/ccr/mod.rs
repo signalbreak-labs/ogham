@@ -83,8 +83,10 @@ fn encode_payload(payload: &CcrPayload) -> String {
 }
 
 /// Decode a stored string into a payload, falling back to `text/plain` for a
-/// plain string that is not an envelope.
-fn decode_payload(stored: &str) -> CcrPayload {
+/// plain string that is not an envelope. Shared with the native backends so a
+/// legacy text envelope (or a plain `save`) still decodes after they switch to
+/// native storage.
+pub(crate) fn decode_payload(stored: &str) -> CcrPayload {
     if let Some(payload) = try_decode_payload(stored) {
         return payload;
     }

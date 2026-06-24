@@ -218,13 +218,7 @@ pub async fn compact_conversation(
         dropped,
         counter.as_ref(),
     );
-    let cache_plan = apply_cache_policy(
-        &mut working,
-        config.cache,
-        model,
-        counter.as_ref(),
-        &mut warnings,
-    );
+    let cache_plan = apply_cache_policy(&mut working, config.cache, model, counter.as_ref());
 
     Ok(CompactResult {
         messages: working,
@@ -500,7 +494,6 @@ pub(crate) fn apply_cache_policy(
     policy: CachePolicy,
     model: &str,
     counter: &dyn TokenCounter,
-    warnings: &mut Vec<String>,
 ) -> CachePlan {
     if policy == CachePolicy::None {
         for msg in messages.iter_mut() {
@@ -535,18 +528,16 @@ pub(crate) fn apply_cache_policy(
             stable_suffix_messages,
             Some(CacheStrategy::OpenAi),
         ),
+        // Gemini caches via an explicit `CachedContent` resource keyed by content
+        // (no inline breakpoints), so it shares the OpenAI/Generic "no
+        // annotations" strategy but is keyed and thresholded as Gemini below.
         CachePolicy::Gemini {
             stable_suffix_messages,
-        } => {
-            warnings.push(
-                "gemini cache policy currently emits a generic stable-prefix plan only".to_string(),
-            );
-            (
-                "gemini",
-                stable_suffix_messages,
-                Some(CacheStrategy::Generic),
-            )
-        }
+        } => (
+            "gemini",
+            stable_suffix_messages,
+            Some(CacheStrategy::Generic),
+        ),
     };
 
     if let Some(strategy) = strategy {
@@ -579,6 +570,7 @@ pub(crate) fn apply_cache_policy(
         CachePolicy::Anthropic { .. } => {
             crate::providers::anthropic::min_cacheable_prefix_tokens(model)
         }
+        CachePolicy::Gemini { .. } => crate::providers::gemini::MIN_CACHEABLE_PREFIX_TOKENS,
         _ => crate::providers::openai::MIN_CACHEABLE_PREFIX_TOKENS,
     };
     let cacheable = stable_prefix_tokens >= min_cacheable;
@@ -594,9 +586,22 @@ pub(crate) fn apply_cache_policy(
 
     let mut notes = Vec::new();
     if stable_suffix_messages > 0 && !prefix.is_empty() && !cacheable {
-        notes.push(format!(
-            "stable prefix is {stable_prefix_tokens} tokens; provider prompt caching typically engages around {min_cacheable}+"
-        ));
+        notes.push(match policy {
+            CachePolicy::Gemini { .. } => format!(
+                "candidate prefix is {stable_prefix_tokens} tokens; Gemini explicit-cache minimums are model-dependent (~{min_cacheable}+)"
+            ),
+            _ => format!(
+                "stable prefix is {stable_prefix_tokens} tokens; provider prompt caching typically engages around {min_cacheable}+"
+            ),
+        });
+    }
+    // Gemini caches an explicit `CachedContent` resource identified by content;
+    // tell the host to (re)create it whenever the content key changes.
+    if matches!(policy, CachePolicy::Gemini { .. }) && content_key.is_some() {
+        notes.push(
+            "gemini: create or refresh the CachedContent resource when content_key changes"
+                .to_string(),
+        );
     }
 
     CachePlan {
@@ -750,6 +755,71 @@ mod tests {
         // OpenAI is content-keyed; no fake cache_control annotations.
         assert!(result.cache_plan.content_key.is_some());
         assert!(result.cache_plan.annotated_message_indices.is_empty());
+    }
+
+    #[tokio::test]
+    async fn gemini_cache_plan_is_gemini_specific() {
+        let result = compact_conversation(
+            vec![
+                Message::new("system", "x".repeat(6000)),
+                Message::new("user", "latest"),
+            ],
+            CompactConfig {
+                cache: CachePolicy::Gemini {
+                    stable_suffix_messages: 1,
+                },
+                model: Some("gemini-2.0-flash".to_string()),
+                ..CompactConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.cache_plan.policy, "gemini");
+        // Gemini caches via a content-keyed CachedContent resource, not inline
+        // cache_control breakpoints.
+        assert!(result.cache_plan.content_key.is_some());
+        assert!(result.cache_plan.annotated_message_indices.is_empty());
+        // The old "generic stable-prefix plan only" warning is gone.
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| w.contains("generic stable-prefix plan only"))
+        );
+        // Large prefix is cacheable, with the CachedContent-refresh guidance note.
+        assert!(result.cache_plan.cacheable);
+        assert!(
+            result
+                .cache_plan
+                .notes
+                .iter()
+                .any(|n| n.contains("CachedContent"))
+        );
+    }
+
+    #[tokio::test]
+    async fn gemini_small_prefix_has_gemini_specific_note() {
+        let result = compact_conversation(
+            vec![Message::new("system", "tiny"), Message::new("user", "q")],
+            CompactConfig {
+                cache: CachePolicy::Gemini {
+                    stable_suffix_messages: 1,
+                },
+                ..CompactConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(!result.cache_plan.cacheable);
+        assert!(
+            result
+                .cache_plan
+                .notes
+                .iter()
+                .any(|n| n.contains("Gemini explicit-cache minimums"))
+        );
     }
 
     #[tokio::test]
