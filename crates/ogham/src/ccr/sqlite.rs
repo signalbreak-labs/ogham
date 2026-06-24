@@ -2,6 +2,7 @@ use super::{CcrPayload, CcrStore};
 use async_trait::async_trait;
 use ogham_core::{OghamError, Result};
 use rusqlite::{Connection, OptionalExtension, params};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -159,6 +160,8 @@ impl CcrStore for SqliteCcrStore {
             "DELETE FROM ccr_entries WHERE created_at + ttl_seconds <= ?1",
             params![now as i64],
         );
+        // A read error is not "missing" — surface it so an exact restore fails
+        // closed rather than looking like an absent original.
         let row: Option<(Vec<u8>, Option<String>, Option<String>)> = conn
             .query_row(
                 "SELECT original, media_type, metadata FROM ccr_entries
@@ -167,23 +170,37 @@ impl CcrStore for SqliteCcrStore {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()
-            .unwrap_or_else(|err| {
+            .map_err(|err| {
                 tracing::warn!(hash = %id, error = %err, "ccr_sqlite_get_payload_failed");
-                None
-            });
-        Ok(row.map(|(bytes, media_type, metadata)| match media_type {
-            // A native payload: reconstruct from the raw bytes + columns.
-            Some(media_type) => CcrPayload {
-                media_type,
-                bytes,
-                metadata: metadata
-                    .and_then(|m| serde_json::from_str(&m).ok())
-                    .unwrap_or_default(),
-            },
+                OghamError::StoreError(err.to_string())
+            })?;
+        let Some((bytes, media_type, metadata)) = row else {
+            return Ok(None);
+        };
+        match media_type {
+            // A native payload: reconstruct from the raw bytes + columns. Malformed
+            // metadata on a native row is corruption — fail closed, don't drop it.
+            Some(media_type) => {
+                let metadata = match metadata {
+                    Some(json) => serde_json::from_str(&json).map_err(|e| {
+                        OghamError::StoreError(format!(
+                            "corrupt CCR payload metadata for {id}: {e}"
+                        ))
+                    })?,
+                    None => HashMap::new(),
+                };
+                Ok(Some(CcrPayload {
+                    media_type,
+                    bytes,
+                    metadata,
+                }))
+            }
             // No media type: a plain `save` or a legacy text envelope — degrade
             // through the shared text decoder.
-            None => super::decode_payload(&String::from_utf8_lossy(&bytes)),
-        }))
+            None => Ok(Some(super::decode_payload(&String::from_utf8_lossy(
+                &bytes,
+            )))),
+        }
     }
 }
 
@@ -263,6 +280,45 @@ mod tests {
         add_column_if_missing(&conn, "ALTER TABLE t ADD COLUMN b TEXT").unwrap();
         // A genuinely failing migration (no such table) must surface, not be hidden.
         assert!(add_column_if_missing(&conn, "ALTER TABLE missing ADD COLUMN c TEXT").is_err());
+    }
+
+    #[tokio::test]
+    async fn corrupt_native_metadata_fails_closed() {
+        let db = TempDb::new();
+        let store = SqliteCcrStore::open(&db.0, 300).unwrap();
+        let payload = CcrPayload {
+            media_type: "application/json".to_string(),
+            bytes: b"{}".to_vec(),
+            metadata: HashMap::new(),
+        };
+        store.save_payload("m", &payload).await.unwrap();
+        // Corrupt the metadata column of the native row.
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE ccr_entries SET metadata = ?1 WHERE hash = ?2",
+                params!["not json", "m"],
+            )
+            .unwrap();
+        // A native row with unparseable metadata must error, not lose metadata.
+        assert!(store.retrieve_payload("m").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn read_error_is_propagated_not_hidden() {
+        let db = TempDb::new();
+        let store = SqliteCcrStore::open(&db.0, 300).unwrap();
+        // Drop the table so the next read genuinely errors.
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute("DROP TABLE ccr_entries", [])
+            .unwrap();
+        // A read error must surface as Err, not be hidden as Ok(None).
+        assert!(store.retrieve_payload("any").await.is_err());
     }
 
     #[tokio::test]

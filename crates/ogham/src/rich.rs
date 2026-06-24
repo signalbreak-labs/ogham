@@ -510,17 +510,11 @@ fn recount_rich_cache_plan(
         CachePolicy::Anthropic { .. } => {
             crate::providers::anthropic::min_cacheable_prefix_tokens(model)
         }
+        CachePolicy::Gemini { .. } => crate::providers::gemini::MIN_CACHEABLE_PREFIX_TOKENS,
         _ => crate::providers::openai::MIN_CACHEABLE_PREFIX_TOKENS,
     };
     plan.stable_prefix_tokens = tokens;
     plan.cacheable = tokens >= min_cacheable;
-    // Refresh the threshold note (if any) to match the recounted tokens.
-    plan.notes.retain(|n| !n.contains("stable prefix is"));
-    if plan.stable_suffix_messages > 0 && prefix_len > 0 && !plan.cacheable {
-        plan.notes.push(format!(
-            "stable prefix is {tokens} tokens; provider prompt caching typically engages around {min_cacheable}+"
-        ));
-    }
 
     // Content-keyed providers identify the prefix by content. The flat pass keyed
     // it off the lossy projection, which collapses opaque blocks (two different
@@ -537,6 +531,32 @@ fn recount_rich_cache_plan(
         }
         CachePolicy::Anthropic { .. } | CachePolicy::None => None,
     };
+
+    // Refresh the provider-specific notes to match the recounted payload: drop any
+    // stale prefix note (either phrasing) and the Gemini CachedContent note, then
+    // re-add what applies now — keeping parity with `apply_cache_policy` so a
+    // recount can't leave contradictory or generic Gemini guidance.
+    plan.notes.retain(|n| {
+        !n.contains("stable prefix is")
+            && !n.contains("candidate prefix is")
+            && !n.contains("CachedContent")
+    });
+    if plan.stable_suffix_messages > 0 && prefix_len > 0 && !plan.cacheable {
+        plan.notes.push(match policy {
+            CachePolicy::Gemini { .. } => format!(
+                "candidate prefix is {tokens} tokens; Gemini explicit-cache minimums are model-dependent (~{min_cacheable}+)"
+            ),
+            _ => format!(
+                "stable prefix is {tokens} tokens; provider prompt caching typically engages around {min_cacheable}+"
+            ),
+        });
+    }
+    if matches!(policy, CachePolicy::Gemini { .. }) && plan.content_key.is_some() {
+        plan.notes.push(
+            "gemini: create or refresh the CachedContent resource when content_key changes"
+                .to_string(),
+        );
+    }
 }
 
 /// A canonical, content-only string identity for a rich prefix: role + ordered
@@ -1276,6 +1296,47 @@ mod tests {
             p1.content_key, p2.content_key,
             "a metadata-only change must not change the content key"
         );
+    }
+
+    #[test]
+    fn rich_recount_gemini_notes_are_specific() {
+        // A stale generic note from the flat pass must be replaced with the
+        // Gemini-specific candidate-prefix + CachedContent guidance after recount.
+        let counter = counter_for_model("default");
+        let prefix = vec![RichMessage::text("system", "tiny")];
+        let mut plan = CachePlan {
+            stable_prefix_messages: 1,
+            stable_suffix_messages: 1,
+            notes: vec![
+                "stable prefix is 5 tokens; provider prompt caching typically engages around 1024+"
+                    .to_string(),
+            ],
+            ..Default::default()
+        };
+        recount_rich_cache_plan(
+            &mut plan,
+            &prefix,
+            CachePolicy::Gemini {
+                stable_suffix_messages: 1,
+            },
+            "gemini-2.0-flash",
+            counter.as_ref(),
+        );
+
+        assert!(!plan.cacheable);
+        // Stale generic note gone; Gemini-specific notes present.
+        assert!(
+            !plan
+                .notes
+                .iter()
+                .any(|n| n.contains("provider prompt caching typically"))
+        );
+        assert!(
+            plan.notes
+                .iter()
+                .any(|n| n.contains("Gemini explicit-cache minimums"))
+        );
+        assert!(plan.notes.iter().any(|n| n.contains("CachedContent")));
     }
 
     #[tokio::test]

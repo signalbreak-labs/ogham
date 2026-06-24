@@ -3,10 +3,11 @@ use async_trait::async_trait;
 use ogham_core::Result;
 use std::collections::HashMap;
 
-/// Magic header marking a natively-framed [`CcrPayload`] value, distinguishing it
-/// from a plain text `save` value (which is arbitrary UTF-8 and won't begin with
-/// these bytes).
-const PAYLOAD_MAGIC: &[u8] = b"OGHMccr\x01";
+/// Magic header marking a natively-framed [`CcrPayload`] value. It begins with
+/// `0xFF` — a byte that can never appear in valid UTF-8 — so a plain text
+/// `save(&str)` value (always valid UTF-8) can never begin with it, and the two
+/// can never be confused regardless of the text's content.
+const PAYLOAD_MAGIC: &[u8] = &[0xff, 0xfe, b'O', b'G', b'H', b'M', b'c', b'c', b'r', 0x01];
 
 /// Frame a payload as `MAGIC | media_type_len:u32le | media_type | meta_len:u32le
 /// | meta_json | raw bytes` — raw bytes, no hex envelope.
@@ -222,6 +223,21 @@ mod tests {
             decode_native(&framed[..PAYLOAD_MAGIC.len() + 2]),
             FrameDecode::Malformed
         ));
+    }
+
+    #[tokio::test]
+    async fn plain_text_resembling_old_magic_round_trips() {
+        // A plain save whose text starts with the literal "OGHMccr\u{1}" (valid
+        // UTF-8) must still round-trip as text — the real magic begins with 0xFF,
+        // which no &str can produce, so there is no collision.
+        let dir = TempDir::new();
+        let store = FjallCcrStore::new(&dir.0).unwrap();
+        let text = "OGHMccr\u{1}this is really just text";
+        store.save("x", text, None).await.unwrap();
+        assert_eq!(store.retrieve("x").await.unwrap().as_deref(), Some(text));
+        let payload = store.retrieve_payload("x").await.unwrap().unwrap();
+        assert_eq!(payload.bytes, text.as_bytes());
+        assert!(payload.media_type.starts_with("text/plain"));
     }
 
     #[tokio::test]
