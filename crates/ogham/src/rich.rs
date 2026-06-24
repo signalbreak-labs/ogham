@@ -153,7 +153,8 @@ pub struct CompactRichConfig {
     pub agent_policy: AgentPolicy,
     /// Block-aware text-compression policy (Phase 1).
     pub rich: RichCompressionPolicy,
-    /// CCR storage policy (shared by block compression and the cascade).
+    /// CCR storage policy shared by block compression and cascade folds. Block
+    /// compression uses it only when `rich.reversible` is enabled.
     pub ccr: CcrPolicy,
     /// Provider cache policy applied to the output.
     pub cache: CachePolicy,
@@ -204,29 +205,33 @@ pub async fn compact_rich(
     let counter = counter_for_model(model);
     let mut warnings = Vec::new();
 
-    let ccr_store = match (&config.ccr, config.rich.reversible) {
-        (CcrPolicy::Store(store), true) => Some(store.clone()),
-        (CcrPolicy::Store(_), false) => None,
-        (CcrPolicy::Disabled, true) => {
-            warnings.push(
-                "rich.reversible requested but ccr is disabled; reversible undo is disabled"
-                    .to_string(),
-            );
+    let ccr_store = match &config.ccr {
+        CcrPolicy::Store(store) => Some(store.clone()),
+        CcrPolicy::Disabled => {
+            if config.rich.reversible {
+                warnings.push(
+                    "rich.reversible requested but ccr is disabled; reversible undo is disabled"
+                        .to_string(),
+                );
+            }
             None
         }
-        (CcrPolicy::Disabled, false) => None,
     };
 
     // Flatten the input for protected-tail evidence and the full-delta folds.
-    let input_flats: Vec<Message> = messages.iter().map(RichMessage::to_flat_lossy).collect();
+    let input_flats: Vec<Message> = messages.iter().map(rich_to_agent_flat_lossy).collect();
     let protected = protected_report(&input_flats, &config.agent_policy, counter.as_ref());
 
     // Phase 1: block-aware text compression (structure preserving, CCR-backed).
-    let rich_compressed =
-        compress_rich_messages(messages, ccr_store.as_ref(), &config.rich).await?;
+    let rich_ccr = if config.rich.reversible {
+        ccr_store.as_ref()
+    } else {
+        None
+    };
+    let rich_compressed = compress_rich_messages(messages, rich_ccr, &config.rich).await?;
     let proj_flats: Vec<Message> = rich_compressed
         .iter()
-        .map(RichMessage::to_flat_lossy)
+        .map(rich_to_agent_flat_lossy)
         .collect();
 
     // Phase 2: conversation cascade on the flat projection.
@@ -239,7 +244,7 @@ pub async fn compact_rich(
     )?
     .with_model(model.to_string())
     .with_question_hint(config.focus.clone())
-    .with_reversible(config.rich.reversible && ccr_store.is_some())
+    .with_reversible(ccr_store.is_some())
     .with_max_tokens(config.budget.as_ref().map(|b| b.total_limit));
 
     let mut budget_report = None;
@@ -314,9 +319,14 @@ fn reconstruct_rich(
                 && let Some(idx) = mapping[pos]
             {
                 let mut rich = rich_compressed[idx].clone();
-                if let Some(cache) = flat.metadata.get(meta_keys::CACHE_CONTROL) {
-                    rich.metadata
-                        .insert(meta_keys::CACHE_CONTROL.to_string(), cache.clone());
+                match flat.metadata.get(meta_keys::CACHE_CONTROL) {
+                    Some(cache) => {
+                        rich.metadata
+                            .insert(meta_keys::CACHE_CONTROL.to_string(), cache.clone());
+                    }
+                    None => {
+                        rich.metadata.remove(meta_keys::CACHE_CONTROL);
+                    }
                 }
                 rich
             } else {
@@ -330,6 +340,37 @@ fn reconstruct_rich(
             }
         })
         .collect()
+}
+
+fn rich_to_agent_flat_lossy(message: &RichMessage) -> Message {
+    let mut flat = message.to_flat_lossy();
+    if rich_content_has_error_tool_result(&message.content) {
+        flat.metadata.insert(
+            meta_keys::AGENT_CONTENT_TYPE.to_string(),
+            agent::AgentContentType::ToolResultError
+                .as_str()
+                .to_string(),
+        );
+        flat.metadata
+            .insert(meta_keys::TOOL_STATUS.to_string(), "error".to_string());
+    }
+    flat
+}
+
+fn rich_content_has_error_tool_result(content: &MessageContent) -> bool {
+    match content {
+        MessageContent::Text(_) => false,
+        MessageContent::Blocks(blocks) => blocks.iter().any(block_has_error_tool_result),
+    }
+}
+
+fn block_has_error_tool_result(block: &ContentBlock) -> bool {
+    match block {
+        ContentBlock::ToolResult {
+            is_error, content, ..
+        } => *is_error || content.iter().any(block_has_error_tool_result),
+        _ => false,
+    }
 }
 
 async fn compress_content(
@@ -415,6 +456,7 @@ async fn compress_text(
 mod tests {
     use super::*;
     use crate::ccr::in_memory::InMemoryCcrStore;
+    use crate::compact::FoldKind;
     use ogham_core::ImageSource;
 
     fn big_json_array() -> String {
@@ -422,6 +464,19 @@ mod tests {
             .map(|i| serde_json::json!({ "id": format!("{:03}", i), "tag": "aaaaa" }))
             .collect();
         serde_json::to_string(&items).unwrap()
+    }
+
+    fn large_tool_output(seed: usize) -> String {
+        (0usize..300)
+            .map(|i| {
+                format!(
+                    "record={seed:02}-{i:03} path=/tmp/ogham/{seed}/{i} status=ok value={} digest={:x}",
+                    i * 37,
+                    seed.wrapping_mul(1_000_003) ^ i.wrapping_mul(97)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn agent_turn() -> RichMessage {
@@ -613,6 +668,33 @@ mod tests {
         assert!(!out[0].metadata.contains_key(meta_keys::CCR_ID));
     }
 
+    #[test]
+    fn rich_projection_marks_error_tool_results_for_agent_policy() {
+        let msg = RichMessage::blocks(
+            "assistant",
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "call_99".into(),
+                is_error: true,
+                content: vec![ContentBlock::Text {
+                    text: "permission denied".into(),
+                }],
+            }],
+        );
+
+        let flat = rich_to_agent_flat_lossy(&msg);
+
+        assert_eq!(
+            crate::agent::classify(&flat),
+            crate::agent::AgentContentType::ToolResultError
+        );
+        assert_eq!(
+            flat.metadata
+                .get(meta_keys::TOOL_STATUS)
+                .map(String::as_str),
+            Some("error")
+        );
+    }
+
     #[tokio::test]
     async fn compact_rich_preserves_structure_for_kept_messages() {
         let store: Arc<dyn CcrStore> = Arc::new(InMemoryCcrStore::new());
@@ -660,11 +742,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compact_rich_removes_stale_cache_metadata_from_kept_messages() {
+        let mut cached = RichMessage::text("system", "sys");
+        cached.metadata.insert(
+            meta_keys::CACHE_CONTROL.to_string(),
+            "ephemeral".to_string(),
+        );
+
+        let result = compact_rich(
+            vec![cached, RichMessage::text("user", "latest")],
+            CompactRichConfig {
+                cache: CachePolicy::None,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !result.messages[0]
+                .metadata
+                .contains_key(meta_keys::CACHE_CONTROL),
+            "kept rich messages must mirror the final flat cache annotations"
+        );
+        assert!(result.cache_plan.annotated_message_indices.is_empty());
+    }
+
+    #[tokio::test]
     async fn compact_rich_enforces_budget_and_reports_folds() {
         let store: Arc<dyn CcrStore> = Arc::new(InMemoryCcrStore::new());
         let mut msgs = vec![RichMessage::text("system", "sys")];
         for i in 0..8 {
-            let mut m = RichMessage::text("tool", "x".repeat(400));
+            let mut m = RichMessage::text("tool", large_tool_output(i));
             m.metadata
                 .insert(meta_keys::TOOL_NAME.to_string(), format!("t{i}"));
             msgs.push(m);
@@ -675,11 +784,11 @@ mod tests {
             msgs,
             CompactRichConfig {
                 budget: Some(ContextBudget {
-                    total_limit: 500,
+                    total_limit: 1_000,
                     safety_margin: Some(0.0),
                 }),
                 agent_policy: AgentPolicy {
-                    keep_recent_tool_results: 2,
+                    keep_recent_tool_results: 0,
                     clear_old_tool_results: true,
                     ..Default::default()
                 },
@@ -693,8 +802,46 @@ mod tests {
         let report = result.budget_report.expect("budget enforced");
         assert!(report.tokens_final <= report.effective_limit);
         assert!(
-            !result.folds.is_empty(),
+            result
+                .folds
+                .iter()
+                .any(|fold| fold.kind == FoldKind::Cleared),
             "clearing old tool results must produce fold records"
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_rich_irreversible_blocks_still_allow_cascade_ccr() {
+        let store: Arc<dyn CcrStore> = Arc::new(InMemoryCcrStore::new());
+        let mut tool = RichMessage::text("tool", large_tool_output(42));
+        tool.metadata
+            .insert(meta_keys::TOOL_NAME.to_string(), "shell".to_string());
+
+        let result = compact_rich(
+            vec![tool, RichMessage::text("user", "latest")],
+            CompactRichConfig {
+                agent_policy: AgentPolicy {
+                    keep_recent_tool_results: 0,
+                    clear_old_tool_results: true,
+                    ..Default::default()
+                },
+                rich: RichCompressionPolicy {
+                    reversible: false,
+                    ..Default::default()
+                },
+                ccr: CcrPolicy::Store(store),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            result
+                .folds
+                .iter()
+                .any(|fold| fold.kind == FoldKind::Cleared && fold.ccr_id.is_some()),
+            "cascade folds should remain CCR-backed when block compression is irreversible"
         );
     }
 
