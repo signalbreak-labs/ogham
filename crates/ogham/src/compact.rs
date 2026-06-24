@@ -759,11 +759,11 @@ mod tests {
 
     #[tokio::test]
     async fn gemini_cache_plan_is_gemini_specific() {
+        // Distinct tokens so the prefix exceeds the threshold under any tokenizer
+        // (a repeated single char BPE-merges to far fewer tokens under tiktoken).
+        let big: String = (0..2000).map(|i| format!("token{i} ")).collect();
         let result = compact_conversation(
-            vec![
-                Message::new("system", "x".repeat(6000)),
-                Message::new("user", "latest"),
-            ],
+            vec![Message::new("system", big), Message::new("user", "latest")],
             CompactConfig {
                 cache: CachePolicy::Gemini {
                     stable_suffix_messages: 1,
@@ -787,7 +787,13 @@ mod tests {
                 .iter()
                 .any(|w| w.contains("generic stable-prefix plan only"))
         );
-        // Large prefix is cacheable, with the CachedContent-refresh guidance note.
+        // The fixture must clear the threshold under whatever counter is active.
+        assert!(
+            result.cache_plan.stable_prefix_tokens
+                >= crate::providers::gemini::MIN_CACHEABLE_PREFIX_TOKENS,
+            "fixture must exceed the Gemini threshold (got {})",
+            result.cache_plan.stable_prefix_tokens
+        );
         assert!(result.cache_plan.cacheable);
         assert!(
             result

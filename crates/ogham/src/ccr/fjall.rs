@@ -133,10 +133,17 @@ impl CcrStore for FjallCcrStore {
     async fn retrieve(&self, id: &str) -> Result<Option<String>> {
         match self.partition.get(id) {
             Ok(Some(bytes)) => match decode_native(&bytes) {
-                // A framed text payload yields its content; a plain value is as-is.
+                // A framed text payload yields its content; a framed *binary*
+                // payload can't be represented as text, so fail closed rather
+                // than report it empty.
                 FrameDecode::Payload(payload) => {
-                    Ok(Some(String::from_utf8(payload.bytes).unwrap_or_default()))
+                    String::from_utf8(payload.bytes).map(Some).map_err(|_| {
+                        ogham_core::OghamError::StoreError(format!(
+                            "CCR entry {id} is a binary payload; use retrieve_payload"
+                        ))
+                    })
                 }
+                // A plain value: arbitrary `save(&str)` text, returned as-is.
                 FrameDecode::NotFramed => {
                     Ok(Some(String::from_utf8(bytes.to_vec()).unwrap_or_default()))
                 }
@@ -238,6 +245,24 @@ mod tests {
         let payload = store.retrieve_payload("x").await.unwrap().unwrap();
         assert_eq!(payload.bytes, text.as_bytes());
         assert!(payload.media_type.starts_with("text/plain"));
+    }
+
+    #[tokio::test]
+    async fn retrieve_text_api_on_binary_payload_fails_closed() {
+        let dir = TempDir::new();
+        let store = FjallCcrStore::new(&dir.0).unwrap();
+        let binary = CcrPayload {
+            media_type: "application/octet-stream".to_string(),
+            bytes: vec![0xff, 0xfe, 0x00],
+            metadata: HashMap::new(),
+        };
+        store.save_payload("b", &binary).await.unwrap();
+        assert_eq!(
+            store.retrieve_payload("b").await.unwrap().as_ref(),
+            Some(&binary)
+        );
+        // Fetching a binary payload via the text API must error, not return "".
+        assert!(store.retrieve("b").await.is_err());
     }
 
     #[tokio::test]

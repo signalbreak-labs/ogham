@@ -105,11 +105,21 @@ impl CcrStore for SqliteCcrStore {
                 |r| r.get::<_, Vec<u8>>(0),
             )
             .optional()
-            .unwrap_or_else(|err| {
+            .map_err(|err| {
                 tracing::warn!(hash = %id, error = %err, "ccr_sqlite_get_failed");
-                None
-            });
-        Ok(row.and_then(|bytes| String::from_utf8(bytes).ok()))
+                OghamError::StoreError(err.to_string())
+            })?;
+        match row {
+            None => Ok(None),
+            Some(bytes) => String::from_utf8(bytes).map(Some).map_err(|_| {
+                // Plain `save` values are always valid UTF-8, so non-UTF-8 bytes
+                // are a native binary payload fetched via the text API — fail
+                // closed rather than report it empty/missing.
+                OghamError::StoreError(format!(
+                    "CCR entry {id} is a binary payload; use retrieve_payload"
+                ))
+            }),
+        }
     }
 
     async fn delete(&self, id: &str) -> Result<()> {
@@ -280,6 +290,24 @@ mod tests {
         add_column_if_missing(&conn, "ALTER TABLE t ADD COLUMN b TEXT").unwrap();
         // A genuinely failing migration (no such table) must surface, not be hidden.
         assert!(add_column_if_missing(&conn, "ALTER TABLE missing ADD COLUMN c TEXT").is_err());
+    }
+
+    #[tokio::test]
+    async fn retrieve_text_api_on_binary_payload_fails_closed() {
+        let db = TempDb::new();
+        let store = SqliteCcrStore::open(&db.0, 300).unwrap();
+        let binary = CcrPayload {
+            media_type: "application/octet-stream".to_string(),
+            bytes: vec![0xff, 0xfe, 0x00],
+            metadata: HashMap::new(),
+        };
+        store.save_payload("b", &binary).await.unwrap();
+        // The typed API restores it exactly; the text API must not report empty.
+        assert_eq!(
+            store.retrieve_payload("b").await.unwrap().as_ref(),
+            Some(&binary)
+        );
+        assert!(store.retrieve("b").await.is_err());
     }
 
     #[tokio::test]
