@@ -32,6 +32,14 @@ jobs:
         run: cargo clippy -p ogham --all-targets --no-default-features -- -D warnings
       - name: clippy (tiktoken feature)
         run: cargo clippy -p ogham --all-targets --features tiktoken -- -D warnings
+      - name: Default ogham build stays lean (no rusqlite/fjall)
+        working-directory: crates/ogham
+        run: |
+          if cargo tree -e normal | grep -iE "rusqlite|fjall"; then
+            echo "::error::default ogham build pulled a heavy CCR backend"
+            exit 1
+          fi
+          echo "default ogham dependency tree is lean"
 
   test:
     name: Test (${{ matrix.os }})

@@ -79,14 +79,14 @@ The safety and honesty foundation is in place:
 
 ### Near-term: correctness and dependency hygiene
 
-- **Slim the default feature set.** The heavy embedded stores are already gated:
-  `ccr-sqlite` (`rusqlite`) and `ccr-fjall` (`fjall`) are on by default for
-  backward compatibility, and `--no-default-features` yields an in-memory-only
-  lean build. The remaining step is a deliberate (breaking) release that moves
-  these out of the default set so the default build is lean by default. The
-  lighter deps (`regex` in content detection, `flate2` in adaptive sizing) sit in
-  core paths and stay non-optional; the TOON encoder is pure Rust and pulls no
-  backend.
+- **Slim the default feature set.** Done (0.4, breaking). `ccr-sqlite`
+  (`rusqlite`) and `ccr-fjall` (`fjall`) are no longer in the default set, so the
+  default `ogham` build is lean (in-memory CCR only); consumers opt into a
+  persistent store with `features = ["ccr-sqlite"]` / `["ccr-fjall"]`.
+  `ogham-server` enables both, and a CI guard keeps the default dependency tree
+  free of the heavy backends. The lighter deps (`regex` in content detection,
+  `flate2` in adaptive sizing) sit in core paths and stay non-optional; the TOON
+  encoder is pure Rust and pulls no backend.
 - **Broaden focus-hint steering.** Done. Every built-in compressor now biases
   retention on the `CompactConfig.focus` hint via the shared `compressors::focus`
   module: `SmartCrusher` (JSON-array records), `LogStripper` (log lines, scored

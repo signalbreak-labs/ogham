@@ -12,10 +12,10 @@ keywords.workspace = true
 categories.workspace = true
 
 [features]
-# Default keeps both embedded CCR backends so existing builds are unchanged.
-# Build with `--no-default-features` for a lean dependency set (in-memory CCR
-# only); opt back into the heavy stores with `ccr-sqlite` / `ccr-fjall`.
-default = ["ccr-sqlite", "ccr-fjall"]
+# Lean by default: in-memory CCR only, no heavy embedded backends. Opt into a
+# persistent store with `ccr-sqlite` and/or `ccr-fjall`. (Through 0.3 these were
+# on by default; see CHANGELOG for the 0.4 migration.)
+default = []
 tiktoken = ["dep:tiktoken-rs"]
 # Persistent CCR stores, each pulling a heavy backend only when enabled.
 ccr-sqlite = ["dep:rusqlite"]

@@ -127,6 +127,15 @@ versions may contain breaking changes).
 
 ### Changed
 
+- **BREAKING (0.4):** the `ccr-sqlite` and `ccr-fjall` features are no longer in
+  the default set, so the default `ogham` build is lean — in-memory CCR only, no
+  `rusqlite`/`fjall`. A consumer that uses `CompressConfig::ccr_store_path`, or
+  `ccr::sqlite::SqliteCcrStore` / `ccr::fjall::FjallCcrStore` directly, must now
+  add `features = ["ccr-sqlite"]` (and/or `"ccr-fjall"`) to its `ogham`
+  dependency. In-memory CCR and all compaction/recall/provider APIs are
+  unaffected. `ogham-server` enables both features, so its behavior is unchanged.
+  A CI guard asserts the default dependency tree stays free of the heavy
+  backends.
 - Conversation compression now fully honors the `PINNED` contract: a message
   marked `meta_keys::PINNED` is never rewritten — not by middle-band compression
   and not by the old-band summary/drop (previously only clearing and budget-drop

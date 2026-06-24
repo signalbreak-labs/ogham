@@ -49,17 +49,19 @@
 //!
 //! ## Feature flags
 //!
-//! - `ccr-sqlite` *(default)* — persistent SQLite CCR store
+//! The default build is lean: in-memory CCR only, no heavy embedded backends.
+//!
+//! - `ccr-sqlite` — persistent SQLite CCR store
 //!   (`ccr::sqlite::SqliteCcrStore`, pulls `rusqlite`). Required for
 //!   `CompressConfig::ccr_store_path`.
-//! - `ccr-fjall` *(default)* — embedded-KV CCR store
+//! - `ccr-fjall` — embedded-KV CCR store
 //!   (`ccr::fjall::FjallCcrStore`, pulls `fjall`).
 //! - `tiktoken` — exact OpenAI token counts via
 //!   `token_counter::TiktokenCounter` (adds the `tiktoken-rs` dependency).
 //!
-//! Build with `--no-default-features` for a lean dependency set: in-memory CCR
-//! only, no `rusqlite`/`fjall`. Re-enable persistence with `ccr-sqlite` and/or
-//! `ccr-fjall`.
+//! Add `features = ["ccr-sqlite"]` (and/or `"ccr-fjall"`) to depend on a
+//! persistent store. Through 0.3 these two were on by default; 0.4 removed them
+//! from the default set so the default dependency footprint is minimal.
 
 pub mod adaptive_sizer;
 pub mod agent;

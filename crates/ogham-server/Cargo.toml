@@ -17,7 +17,9 @@ path = "src/main.rs"
 
 [dependencies]
 ogham-core = { workspace = true }
-ogham = { workspace = true }
+# The server is batteries-included: it instantiates both persistent CCR stores,
+# so it enables those features explicitly now that they are not on by default.
+ogham = { workspace = true, features = ["ccr-sqlite", "ccr-fjall"] }
 
 axum = { workspace = true }
 tokio = { workspace = true }
