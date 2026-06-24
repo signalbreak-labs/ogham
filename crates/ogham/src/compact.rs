@@ -75,8 +75,11 @@ pub struct CompactConfig {
     /// Optional focus/question hint forwarded to compressors via
     /// `CompressionContext::question_hint`.
     ///
-    /// `SmartCrusher` consumes it to bias which records survive sampling of
-    /// large JSON arrays; other built-in compressors currently ignore it.
+    /// Every built-in compressor biases retention toward content matching the
+    /// hint: `SmartCrusher` keeps matching records when sampling large JSON
+    /// arrays, `LogStripper` retains matching log lines (without evicting
+    /// errors), `AstCodeCompressor` keeps matching code lines at full length,
+    /// and `SemanticCompressor` keeps matching paragraphs full and un-deduped.
     /// Protected content (system prompts, errors, the latest user query, the
     /// protected tail) is never overridden by focus.
     pub focus: Option<String>,

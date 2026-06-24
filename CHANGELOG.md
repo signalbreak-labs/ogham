@@ -9,6 +9,16 @@ versions may contain breaking changes).
 
 ### Added
 
+- Focus-hint steering across all built-in compressors. Previously only
+  `SmartCrusher` consumed `CompactConfig.focus`; now `LogStripper`,
+  `AstCodeCompressor`, and `SemanticCompressor` do too, via the shared
+  `compressors::focus` module. `LogStripper` retains log lines matching the
+  hint (scored below errors/fails, so focus never evicts a diagnostic),
+  `AstCodeCompressor` keeps matching code lines at full length instead of
+  truncating them, and `SemanticCompressor` keeps matching paragraphs full and
+  un-deduplicated. An empty/noise-only hint is byte-identical to the no-hint
+  path. (Also hardened: the code/semantic truncation now slices on a UTF-8 char
+  boundary, fixing a latent multibyte panic.)
 - Structured fold tags (`ogham::fold_tags`): every `FoldRecord` now carries a
   deterministic `FoldTags { tool_names, error_classes, file_paths }`, extracted
   offline during compaction from the fold's original messages (tool names from

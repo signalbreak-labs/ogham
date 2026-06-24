@@ -23,6 +23,14 @@ impl SemanticCompressor {
     }
 
     pub fn compress_text(&self, text: &str) -> String {
+        self.compress_text_focused(text, &[])
+    }
+
+    /// Compress text, additionally keeping paragraphs that match the `focus`
+    /// terms at full length and never replacing them with a `[see paragraph N]`
+    /// dedup reference. Unfocused paragraphs keep the default dedup/truncate
+    /// behavior.
+    pub fn compress_text_focused(&self, text: &str, focus: &[String]) -> String {
         // Split into paragraphs
         let paragraphs: Vec<&str> = text.split("\n\n").collect();
         let mut seen: HashMap<String, usize> = HashMap::new();
@@ -34,17 +42,23 @@ impl SemanticCompressor {
             if normalized.is_empty() {
                 continue;
             }
-            if let Some(&first_idx) = seen.get(&normalized) {
+            let is_focus = crate::compressors::focus::matches(para, focus);
+            // Focus paragraphs bypass dedup so they are always emitted in full.
+            if !is_focus && let Some(&first_idx) = seen.get(&normalized) {
                 dup_count += 1;
                 if dup_count <= 3 {
                     out.push(format!("[see paragraph {}]", first_idx + 1));
                 }
                 continue;
             }
-            seen.insert(normalized.clone(), out.len());
-            // Trim each paragraph to a reasonable length
-            let trimmed = if para.len() > 800 {
-                format!("{}... [truncated]", &para[..800])
+            // Remember the first position this paragraph appeared at.
+            seen.entry(normalized.clone()).or_insert(out.len());
+            // Trim non-focus paragraphs to a reasonable length (char-safe).
+            let trimmed = if !is_focus && para.len() > 800 {
+                format!(
+                    "{}... [truncated]",
+                    crate::compressors::truncate_on_boundary(para, 800)
+                )
             } else {
                 para.to_string()
             };
@@ -78,7 +92,8 @@ impl Compressor for SemanticCompressor {
             content.data.len()
         );
         let text = String::from_utf8_lossy(&content.data);
-        let compressed = self.compress_text(&text);
+        let focus = crate::compressors::focus::terms(ctx.question_hint.as_deref().unwrap_or(""));
+        let compressed = self.compress_text_focused(&text, &focus);
         let compressed_tokens = compressed.len() / 4;
         let id = compute_key(content.data.as_ref());
         if ctx.reversible
@@ -122,6 +137,38 @@ mod tests {
         let comp = SemanticCompressor::new();
         let input = "a".repeat(2000);
         let out = comp.compress_text(&input);
+        assert!(out.contains("[truncated]"));
+    }
+
+    #[test]
+    fn focus_keeps_paragraph_full_and_undeduped() {
+        let comp = SemanticCompressor::new();
+        let long = format!("auth token rotation {}", "x".repeat(1000));
+        // Two identical focus-matching paragraphs.
+        let input = format!("{long}\n\n{long}");
+        let focus = crate::compressors::focus::terms("auth");
+        let out = comp.compress_text_focused(&input, &focus);
+        assert!(
+            !out.contains("[truncated]"),
+            "focus paragraph kept full length"
+        );
+        assert!(
+            !out.contains("[see paragraph"),
+            "focus paragraph not deduped"
+        );
+        assert_eq!(
+            out.matches("auth token rotation").count(),
+            2,
+            "both focus paragraphs emitted in full"
+        );
+    }
+
+    #[test]
+    fn non_focus_paragraph_still_truncates_on_char_boundary() {
+        let comp = SemanticCompressor::new();
+        // Multibyte content longer than the 800-byte cap must not panic.
+        let input = "é".repeat(1000);
+        let out = comp.compress_text_focused(&input, &crate::compressors::focus::terms("auth"));
         assert!(out.contains("[truncated]"));
     }
 }

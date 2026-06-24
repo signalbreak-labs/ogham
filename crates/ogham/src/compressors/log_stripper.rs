@@ -367,6 +367,18 @@ impl LogCompressor {
     }
 
     pub fn compress(&self, content: &str, bias: f64) -> LogCompressionResult {
+        self.compress_focused(content, bias, &[])
+    }
+
+    /// Compress, additionally retaining lines that match the `focus` terms even
+    /// when scoring would otherwise drop them. Focus never evicts errors/fails
+    /// (those outrank focus); it competes for the discretionary line budget.
+    pub fn compress_focused(
+        &self,
+        content: &str,
+        bias: f64,
+        focus: &[String],
+    ) -> LogCompressionResult {
         let lines: Vec<&str> = content.split('\n').collect();
         let original_line_count = lines.len();
         if original_line_count < self.config.min_lines_for_ccr {
@@ -383,7 +395,7 @@ impl LogCompressor {
         }
         let format = detect_format(&lines);
         let log_lines = self.parse_lines(&lines);
-        let selected = self.select_lines(&log_lines, bias);
+        let selected = self.select_lines(&log_lines, bias, focus);
         let (compressed_body, output_stats) = self.format_output(&selected, &log_lines);
         let mut compressed = compressed_body;
         let ratio = compressed.len() as f64 / content.len().max(1) as f64;
@@ -443,7 +455,7 @@ impl LogCompressor {
         out
     }
 
-    fn select_lines(&self, log_lines: &[LogLine], bias: f64) -> Vec<LogLine> {
+    fn select_lines(&self, log_lines: &[LogLine], bias: f64, focus: &[String]) -> Vec<LogLine> {
         let all_strings: Vec<&str> = log_lines.iter().map(|l| l.content.as_str()).collect();
         let adaptive_max =
             compute_optimal_k(&all_strings, bias, 10, Some(self.config.max_total_lines));
@@ -495,6 +507,19 @@ impl LogCompressor {
         if self.config.keep_summary_lines {
             for line in summaries {
                 selected.insert(line);
+            }
+        }
+        // Focus bucket: retain lines matching the caller's focus hint even if
+        // they are plain info/debug. A boosted score keeps them through the
+        // final truncation, but stays below errors/fails (1.0) so focus never
+        // evicts a diagnostic.
+        if !focus.is_empty() {
+            for line in log_lines {
+                if crate::compressors::focus::matches(&line.content, focus) {
+                    let mut boosted = line.clone();
+                    boosted.score = FOCUS_LINE_SCORE;
+                    selected.insert(boosted);
+                }
             }
         }
         let selected_indices: BTreeSet<usize> = selected.iter().map(|l| l.line_number).collect();
@@ -626,6 +651,10 @@ fn count_level(lines: &[LogLine], level: LogLevel) -> u64 {
     lines.iter().filter(|l| l.level == level).count() as u64
 }
 
+/// Score given to a focus-matched line: above warnings/info/summaries but below
+/// errors/fails (1.0), so focus is retained without ever evicting a diagnostic.
+const FOCUS_LINE_SCORE: f32 = 0.95;
+
 fn score_log_line(line: &LogLine) -> f32 {
     let level_score: f32 = match line.level {
         LogLevel::Error | LogLevel::Fail => 1.0,
@@ -693,7 +722,8 @@ impl Compressor for LogStripper {
         } else {
             1.0
         };
-        let result = self.compressor.compress(&text, bias);
+        let focus = crate::compressors::focus::terms(ctx.question_hint.as_deref().unwrap_or(""));
+        let result = self.compressor.compress_focused(&text, bias, &focus);
         let compressed_tokens = result.compressed.len() / 4;
         let id = compute_key(content.data.as_ref());
         if ctx.reversible
@@ -757,5 +787,59 @@ mod tests {
         let result = cmp.compress("a\nb\nc", 1.0);
         assert_eq!(result.compressed, "a\nb\nc");
         assert_eq!(result.compression_ratio, 1.0);
+    }
+
+    #[test]
+    fn focus_retains_matching_info_line() {
+        let cmp = LogCompressor::new(LogCompressorConfig {
+            max_total_lines: 5,
+            min_lines_for_ccr: 5,
+            min_compression_ratio_for_ccr: 0.95,
+            ..Default::default()
+        });
+        // 50 nondescript info lines with one buried needle in the middle.
+        let mut content = String::new();
+        for i in 0..50 {
+            if i == 25 {
+                content.push_str("INFO needle focusmarker here\n");
+            } else {
+                content.push_str(&format!("INFO line {i}\n"));
+            }
+        }
+        let focus = crate::compressors::focus::terms("focusmarker");
+
+        let plain = cmp.compress(&content, 1.0);
+        assert!(
+            !plain.compressed.contains("focusmarker"),
+            "without focus the buried info line is dropped"
+        );
+
+        let focused = cmp.compress_focused(&content, 1.0, &focus);
+        assert!(
+            focused.compressed.contains("focusmarker"),
+            "focus retains the matching line"
+        );
+    }
+
+    #[test]
+    fn focus_never_evicts_errors() {
+        let cmp = LogCompressor::new(LogCompressorConfig {
+            max_total_lines: 3,
+            min_lines_for_ccr: 5,
+            min_compression_ratio_for_ccr: 0.95,
+            ..Default::default()
+        });
+        let mut content = String::new();
+        content.push_str("ERROR critical boom\n");
+        for i in 0..50 {
+            content.push_str(&format!("INFO focusmarker line {i}\n"));
+        }
+        // Focus matches many info lines, but the single error must still survive.
+        let focus = crate::compressors::focus::terms("focusmarker");
+        let focused = cmp.compress_focused(&content, 1.0, &focus);
+        assert!(
+            focused.compressed.contains("ERROR critical boom"),
+            "errors outrank focus and are never evicted by it"
+        );
     }
 }

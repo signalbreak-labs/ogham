@@ -87,10 +87,13 @@ The safety and honesty foundation is in place:
   lighter deps (`regex` in content detection, `flate2` in adaptive sizing) sit in
   core paths and stay non-optional; the TOON encoder is pure Rust and pulls no
   backend.
-- **Broaden focus-hint steering.** `SmartCrusher` already biases JSON-array
-  record retention on the `CompactConfig.focus` hint, end to end through the
-  budget cascade. Extend the same steering to the other content-type compressors
-  (logs, code, semantic text), still without overriding protected content.
+- **Broaden focus-hint steering.** Done. Every built-in compressor now biases
+  retention on the `CompactConfig.focus` hint via the shared `compressors::focus`
+  module: `SmartCrusher` (JSON-array records), `LogStripper` (log lines, scored
+  below errors so focus never evicts a diagnostic), `AstCodeCompressor` (code
+  lines kept full-length), and `SemanticCompressor` (paragraphs kept full and
+  un-deduplicated). Protected content is still never overridden, and an
+  empty/noise-only hint is byte-identical to the no-hint path.
 
 ### Mid-term: richer host content and provider planning
 

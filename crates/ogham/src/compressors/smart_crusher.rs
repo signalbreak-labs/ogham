@@ -6,6 +6,8 @@ use tracing::debug;
 
 use crate::adaptive_sizer::compute_optimal_k;
 use crate::ccr::{CcrStore, compute_key, marker_for};
+// Focus/question-hint steering is shared across the content compressors.
+use crate::compressors::focus::{relevance as focus_relevance, terms as focus_terms};
 // use crate::detect::is_json_array_of_dicts; // unused for now
 use crate::stats_math;
 
@@ -860,29 +862,6 @@ impl Compressor for SmartCrusher {
             Ok(None)
         }
     }
-}
-
-/// Split a focus/question hint into lowercased search terms (alphanumeric runs
-/// of length >= 2). Returns empty for an empty or noise-only hint, which keeps
-/// unfocused compression byte-for-byte identical to the no-hint path.
-fn focus_terms(query: &str) -> Vec<String> {
-    query
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|t| t.chars().count() >= 2)
-        .map(str::to_lowercase)
-        .collect()
-}
-
-/// Score how strongly a serialized record matches the focus terms. Each matched
-/// term contributes a boost large enough to dominate length-based ties so a
-/// matching record is pulled into the kept set. Zero when there are no terms.
-fn focus_relevance(item: &str, focus: &[String]) -> f64 {
-    if focus.is_empty() {
-        return 0.0;
-    }
-    let lower = item.to_lowercase();
-    let hits = focus.iter().filter(|t| lower.contains(t.as_str())).count();
-    hits as f64 * 100.0
 }
 
 #[cfg(test)]
