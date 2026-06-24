@@ -148,21 +148,27 @@ pub fn render_cache_control(messages: &[Message]) -> AnthropicMessages {
 pub fn render_cache_control_rich(messages: &[RichMessage]) -> AnthropicMessages {
     let mut system = Vec::new();
     let mut turns = Vec::new();
-    // Native `tool_use` ids emitted so far. A `tool_result` whose id is not here
-    // is an orphan (its `tool_use` was folded away); Anthropic rejects an
-    // out-of-sequence tool result, so it is demoted to text instead.
-    let mut seen_tool_use: HashSet<String> = HashSet::new();
+    // Tool-call ids from the immediately preceding assistant turn that a
+    // `tool_result` in the next user turn may answer. Anthropic requires tool
+    // results to immediately follow their tool_use, so this is reset on every
+    // message — only the directly-following user turn can consume them.
+    let mut pending_tool_use: HashSet<String> = HashSet::new();
     for m in messages {
         // Anthropic role: system goes to the top-level field; assistant stays
-        // assistant; everything else (incl. `tool`) is a user turn. Blocks are
-        // then rendered for that role so a misplaced `tool_use`/`tool_result`
-        // can't produce a provider-invalid turn.
+        // assistant; everything else (incl. `tool`) is a user turn.
         let role = match m.role.as_str() {
             "system" => "system",
             "assistant" => "assistant",
             _ => "user",
         };
-        let mut blocks = render_message_content(&m.content, role, &mut seen_tool_use);
+        let mut blocks = match role {
+            "assistant" => render_assistant_content(&m.content, &mut pending_tool_use),
+            "user" => render_user_content(&m.content, &mut pending_tool_use),
+            _ => {
+                pending_tool_use.clear();
+                render_system_content(&m.content)
+            }
+        };
         if blocks.is_empty() {
             continue;
         }
@@ -183,23 +189,25 @@ pub fn render_cache_control_rich(messages: &[RichMessage]) -> AnthropicMessages 
     }
 }
 
-fn render_message_content(
-    content: &MessageContent,
-    role: &str,
-    seen_tool_use: &mut HashSet<String>,
-) -> Vec<Value> {
+/// Render an assistant turn. `tool_use` is native; its id becomes answerable by
+/// the next user turn (`pending` is reset to exactly this turn's ids). A
+/// `tool_result` is invalid in an assistant turn and is linearized to text.
+fn render_assistant_content(content: &MessageContent, pending: &mut HashSet<String>) -> Vec<Value> {
+    pending.clear();
     match content {
         MessageContent::Text(text) => vec![json!({ "type": "text", "text": text })],
         MessageContent::Blocks(blocks) => {
             let mut out = Vec::with_capacity(blocks.len());
             for block in blocks {
-                out.push(render_block_in_role(block, role, seen_tool_use));
-                // Record native tool_use ids so a later user turn's tool_result
-                // can be matched to a surviving tool_use.
-                if role == "assistant"
-                    && let ContentBlock::ToolUse { id, .. } = block
-                {
-                    seen_tool_use.insert(id.clone());
+                match block {
+                    ContentBlock::ToolUse { id, .. } => {
+                        pending.insert(id.clone());
+                        out.push(render_block(block));
+                    }
+                    ContentBlock::ToolResult { tool_use_id, .. } => out.push(
+                        json!({ "type": "text", "text": format!("[tool_result for {tool_use_id}]") }),
+                    ),
+                    _ => out.push(render_block(block)),
                 }
             }
             out
@@ -207,37 +215,62 @@ fn render_message_content(
     }
 }
 
-/// Render a top-level block, enforcing Anthropic's role + sequencing rules:
-/// `tool_use` is valid only in an assistant turn, `tool_result` only in a user
-/// turn, and a `tool_result` is valid only when a preceding `tool_use` with its
-/// id survived. A block that violates these is linearized to a `text` block
-/// (preserving its content) so the request stays valid however the host labeled
-/// the message.
-fn render_block_in_role(
-    block: &ContentBlock,
-    role: &str,
-    seen_tool_use: &HashSet<String>,
-) -> Value {
-    match block {
-        ContentBlock::ToolUse { id, name, .. } if role != "assistant" => {
-            json!({ "type": "text", "text": format!("[tool_use {name} ({id})]") })
+/// Render a user turn. A `tool_result` is native only if it answers an
+/// outstanding tool_use from the immediately preceding assistant turn (consumed
+/// so duplicates demote); all native results are emitted *before* any other
+/// block, as Anthropic requires. Everything else — orphan/duplicate results, a
+/// misplaced `tool_use` — is linearized to text. `pending` is cleared after, so
+/// only this directly-following turn can answer the tool uses.
+fn render_user_content(content: &MessageContent, pending: &mut HashSet<String>) -> Vec<Value> {
+    let rendered = match content {
+        MessageContent::Text(text) => vec![json!({ "type": "text", "text": text })],
+        MessageContent::Blocks(blocks) => {
+            let mut results = Vec::new();
+            let mut others = Vec::new();
+            for block in blocks {
+                match block {
+                    ContentBlock::ToolResult { tool_use_id, .. } if pending.remove(tool_use_id) => {
+                        results.push(render_block(block));
+                    }
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        ..
+                    } => others.push(json!({
+                        "type": "text",
+                        "text": format!("[tool_result for {tool_use_id}]{}", tool_result_text(content)),
+                    })),
+                    ContentBlock::ToolUse { id, name, .. } => others.push(
+                        json!({ "type": "text", "text": format!("[tool_use {name} ({id})]") }),
+                    ),
+                    _ => others.push(render_block(block)),
+                }
+            }
+            results.extend(others);
+            results
         }
-        ContentBlock::ToolResult { tool_use_id, .. } if role != "user" => {
-            json!({ "type": "text", "text": format!("[tool_result for {tool_use_id}]") })
-        }
-        ContentBlock::ToolResult {
-            tool_use_id,
-            content,
-            ..
-        } if !seen_tool_use.contains(tool_use_id) => {
-            // Orphan tool_result: preserve its content as text rather than emit
-            // an out-of-sequence native tool_result.
-            json!({
-                "type": "text",
-                "text": format!("[tool_result for {tool_use_id}]{}", tool_result_text(content)),
+    };
+    pending.clear();
+    rendered
+}
+
+/// Render a system message's content. System content is text; any stray tool
+/// block is linearized to text so the top-level `system` field stays valid.
+fn render_system_content(content: &MessageContent) -> Vec<Value> {
+    match content {
+        MessageContent::Text(text) => vec![json!({ "type": "text", "text": text })],
+        MessageContent::Blocks(blocks) => blocks
+            .iter()
+            .map(|block| match block {
+                ContentBlock::ToolUse { id, name, .. } => {
+                    json!({ "type": "text", "text": format!("[tool_use {name} ({id})]") })
+                }
+                ContentBlock::ToolResult { tool_use_id, .. } => {
+                    json!({ "type": "text", "text": format!("[tool_result for {tool_use_id}]") })
+                }
+                _ => render_block(block),
             })
-        }
-        _ => render_block(block),
+            .collect(),
     }
 }
 
@@ -594,6 +627,85 @@ mod tests {
                 .unwrap()
                 .iter()
                 .all(|b| b["type"] != "tool_result")
+        );
+    }
+
+    fn tool_use_msg(id: &str) -> RichMessage {
+        RichMessage::blocks(
+            "assistant",
+            vec![ContentBlock::ToolUse {
+                id: id.into(),
+                name: "shell".into(),
+                input: json!({}),
+            }],
+        )
+    }
+
+    fn tool_result_block(id: &str, text: &str) -> ContentBlock {
+        ContentBlock::ToolResult {
+            tool_use_id: id.into(),
+            is_error: false,
+            content: vec![ContentBlock::Text { text: text.into() }],
+        }
+    }
+
+    #[test]
+    fn tool_results_render_before_text_in_user_turn() {
+        // The user turn lists text before the result; Anthropic needs results
+        // first, so the renderer must reorder.
+        let user = RichMessage::blocks(
+            "user",
+            vec![
+                ContentBlock::Text {
+                    text: "results:".into(),
+                },
+                tool_result_block("call_1", "ok"),
+            ],
+        );
+        let rendered = render_cache_control_rich(&[tool_use_msg("call_1"), user]);
+        let content = &rendered.messages[1]["content"];
+        assert_eq!(content[0]["type"], "tool_result");
+        assert_eq!(content[0]["tool_use_id"], "call_1");
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[1]["text"], "results:");
+    }
+
+    #[test]
+    fn tool_result_after_intervening_turn_is_demoted() {
+        // tool_use, then a non-answering assistant turn, then the result: the
+        // result no longer immediately follows its tool_use, so it is demoted.
+        let intervening = RichMessage::text("assistant", "still thinking");
+        let user = RichMessage::blocks("user", vec![tool_result_block("call_1", "late")]);
+        let rendered = render_cache_control_rich(&[tool_use_msg("call_1"), intervening, user]);
+        let content = &rendered.messages[2]["content"];
+        assert_eq!(content[0]["type"], "text");
+        assert!(
+            content[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("[tool_result for call_1]")
+        );
+    }
+
+    #[test]
+    fn duplicate_tool_result_is_demoted() {
+        // Two results answer the same tool_use; only the first is native.
+        let user = RichMessage::blocks(
+            "user",
+            vec![
+                tool_result_block("call_1", "first"),
+                tool_result_block("call_1", "second"),
+            ],
+        );
+        let rendered = render_cache_control_rich(&[tool_use_msg("call_1"), user]);
+        let content = &rendered.messages[1]["content"];
+        assert_eq!(content[0]["type"], "tool_result");
+        assert_eq!(content[1]["type"], "text");
+        assert!(
+            content[1]["text"]
+                .as_str()
+                .unwrap()
+                .contains("[tool_result for call_1]")
         );
     }
 

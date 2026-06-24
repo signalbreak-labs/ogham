@@ -484,11 +484,11 @@ fn block_compression_fold(
     }
 }
 
-/// Recompute the cache plan's stable-prefix token accounting against the final
-/// rich payload. Positional fields (`stable_prefix_messages`, annotations) are
-/// kept from the flat pass; only `stable_prefix_tokens`, `cacheable`, and the
-/// threshold note are corrected, using rich-aware token counting and the
-/// provider-/model-specific minimum.
+/// Recompute the cache plan's stable-prefix accounting against the final rich
+/// payload. Positional fields (`stable_prefix_messages`, annotations) are kept
+/// from the flat pass; `stable_prefix_tokens`, `cacheable`, the threshold note,
+/// and the content identity are corrected, using rich-aware token counting, the
+/// provider-/model-specific minimum, and a rich-aware `content_key`.
 fn recount_rich_cache_plan(
     plan: &mut CachePlan,
     out: &[RichMessage],
@@ -497,10 +497,8 @@ fn recount_rich_cache_plan(
     counter: &dyn TokenCounter,
 ) {
     let prefix_len = plan.stable_prefix_messages.min(out.len());
-    let tokens: usize = out[..prefix_len]
-        .iter()
-        .map(|m| rich_message_tokens(m, counter))
-        .sum();
+    let prefix = &out[..prefix_len];
+    let tokens: usize = prefix.iter().map(|m| rich_message_tokens(m, counter)).sum();
     let min_cacheable = match policy {
         CachePolicy::Anthropic { .. } => {
             crate::providers::anthropic::min_cacheable_prefix_tokens(model)
@@ -516,6 +514,21 @@ fn recount_rich_cache_plan(
             "stable prefix is {tokens} tokens; provider prompt caching typically engages around {min_cacheable}+"
         ));
     }
+
+    // Content-keyed providers identify the prefix by content. The flat pass keyed
+    // it off the lossy projection, which collapses opaque blocks (two different
+    // images both render `[image: png]`) and predates block compression, so the
+    // key could collide or go stale. Recompute it from a canonical serialization
+    // of the final rich prefix, which includes the opaque block payloads.
+    plan.content_key = match policy {
+        CachePolicy::OpenAi { .. } | CachePolicy::Gemini { .. } | CachePolicy::Generic { .. } => {
+            (prefix_len > 0).then(|| {
+                let serialized = serde_json::to_string(prefix).unwrap_or_default();
+                format!("rich-{}", compute_key(serialized.as_bytes()))
+            })
+        }
+        CachePolicy::Anthropic { .. } | CachePolicy::None => None,
+    };
 }
 
 /// Token estimate for a rich message that counts opaque block payloads (image
@@ -1084,6 +1097,53 @@ mod tests {
 
         assert_eq!(result.cache_plan.policy, "openai");
         assert_eq!(result.cache_plan.stable_prefix_messages, 3);
+    }
+
+    #[test]
+    fn rich_content_key_distinguishes_image_bytes() {
+        // Two prefixes differing only in image bytes share the same lossy flat
+        // text ("[image: image/png]"); the rich-aware content key must differ.
+        let counter = counter_for_model("default");
+        let img = |data: &str| {
+            RichMessage::blocks(
+                "user",
+                vec![ContentBlock::Image {
+                    source: ImageSource::Base64 {
+                        media_type: "image/png".into(),
+                        data: data.into(),
+                    },
+                    alt: None,
+                }],
+            )
+        };
+        let policy = CachePolicy::OpenAi {
+            stable_suffix_messages: 1,
+        };
+        let mut plan_a = CachePlan {
+            stable_prefix_messages: 1,
+            stable_suffix_messages: 1,
+            ..Default::default()
+        };
+        let mut plan_b = plan_a.clone();
+        recount_rich_cache_plan(
+            &mut plan_a,
+            &[img("AAAA")],
+            policy,
+            "gpt-4o",
+            counter.as_ref(),
+        );
+        recount_rich_cache_plan(
+            &mut plan_b,
+            &[img("ZZZZ")],
+            policy,
+            "gpt-4o",
+            counter.as_ref(),
+        );
+        assert!(plan_a.content_key.is_some());
+        assert_ne!(
+            plan_a.content_key, plan_b.content_key,
+            "different image bytes must yield different cache content keys"
+        );
     }
 
     #[tokio::test]
