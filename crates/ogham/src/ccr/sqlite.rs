@@ -128,10 +128,15 @@ impl CcrStore for SqliteCcrStore {
         Ok(())
     }
 
-    /// Store a typed payload natively: raw bytes in the `original` BLOB plus the
-    /// media type and metadata columns — no hex envelope, so binary payloads cost
-    /// their real size.
+    /// Store a typed payload. A UTF-8 payload keeps the self-describing text
+    /// envelope (no hex penalty, and readable by older binaries that predate the
+    /// native columns); only a *binary* payload is stored natively (raw bytes in
+    /// the `original` BLOB plus the media-type/metadata columns) so it costs its
+    /// real size instead of a 2x hex envelope.
     async fn save_payload(&self, id: &str, payload: &CcrPayload) -> Result<()> {
+        if std::str::from_utf8(&payload.bytes).is_ok() {
+            return self.save(id, &super::encode_payload(payload), None).await;
+        }
         let now = Self::now_unix_seconds();
         let metadata_json =
             serde_json::to_string(&payload.metadata).unwrap_or_else(|_| "{}".to_string());
@@ -241,7 +246,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn payload_round_trips_native_text_and_binary() {
+    async fn payload_round_trips_text_envelope_and_native_binary() {
         let db = TempDb::new();
         let store = SqliteCcrStore::open(&db.0, 300).unwrap();
 
@@ -257,6 +262,10 @@ mod tests {
             store.retrieve_payload("t").await.unwrap().as_ref(),
             Some(&text)
         );
+        // Rollback-readable: a UTF-8 payload is kept as the text envelope, so an
+        // older binary's text decoder can still reconstruct it.
+        let stored = store.retrieve("t").await.unwrap().unwrap();
+        assert_eq!(crate::ccr::decode_payload(&stored), text);
 
         // Binary survives natively (no hex envelope).
         let binary = CcrPayload {
@@ -314,9 +323,10 @@ mod tests {
     async fn corrupt_native_metadata_fails_closed() {
         let db = TempDb::new();
         let store = SqliteCcrStore::open(&db.0, 300).unwrap();
+        // Binary bytes so the payload is stored in the native columns.
         let payload = CcrPayload {
-            media_type: "application/json".to_string(),
-            bytes: b"{}".to_vec(),
+            media_type: "application/octet-stream".to_string(),
+            bytes: vec![0xff, 0x00],
             metadata: HashMap::new(),
         };
         store.save_payload("m", &payload).await.unwrap();

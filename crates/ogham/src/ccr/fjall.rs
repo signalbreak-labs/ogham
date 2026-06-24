@@ -161,9 +161,14 @@ impl CcrStore for FjallCcrStore {
         Ok(())
     }
 
-    /// Store a typed payload natively as a compact binary frame (raw bytes, no
-    /// hex envelope), so binary payloads cost their real size.
+    /// Store a typed payload. A UTF-8 payload keeps the self-describing text
+    /// envelope (no hex penalty, and readable by older binaries that predate the
+    /// native frame); only a *binary* payload is stored as a native frame (raw
+    /// bytes, no hex) so it costs its real size.
     async fn save_payload(&self, id: &str, payload: &CcrPayload) -> Result<()> {
+        if std::str::from_utf8(&payload.bytes).is_ok() {
+            return self.save(id, &super::encode_payload(payload), None).await;
+        }
         self.partition
             .insert(id, encode_native(payload))
             .map_err(|e| ogham_core::OghamError::StoreError(e.to_string()))?;
@@ -279,10 +284,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn payload_round_trips_native_text_and_binary() {
+    async fn payload_round_trips_text_envelope_and_native_binary() {
         let dir = TempDir::new();
         let store = FjallCcrStore::new(&dir.0).unwrap();
 
+        // A UTF-8 payload keeps the rollback-safe text envelope.
         let text = CcrPayload {
             media_type: "application/json".to_string(),
             bytes: br#"{"a":1}"#.to_vec(),
@@ -293,12 +299,12 @@ mod tests {
             store.retrieve_payload("t").await.unwrap().as_ref(),
             Some(&text)
         );
-        // The text API reads the framed text payload's content back.
-        assert_eq!(
-            store.retrieve("t").await.unwrap().as_deref(),
-            Some(r#"{"a":1}"#)
-        );
+        // Rollback-readable: an older binary's text decoder reconstructs it from
+        // the raw stored value (an envelope, not a native frame).
+        let stored = store.retrieve("t").await.unwrap().unwrap();
+        assert_eq!(crate::ccr::decode_payload(&stored), text);
 
+        // A binary payload is stored as a native frame (no hex envelope).
         let binary = CcrPayload {
             media_type: "application/octet-stream".to_string(),
             bytes: vec![0xff, 0xfe, 0x00, 0x80],

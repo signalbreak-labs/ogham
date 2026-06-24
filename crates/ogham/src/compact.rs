@@ -595,13 +595,14 @@ pub(crate) fn apply_cache_policy(
             ),
         });
     }
-    // Gemini caches an explicit `CachedContent` resource identified by content;
-    // tell the host to (re)create it whenever the content key changes.
+    // Gemini caches an explicit `CachedContent` resource identified by content.
+    // Its real minimum is model-dependent, so `cacheable` (computed from the
+    // ~1024 floor) may overstate caching for a model with a higher minimum —
+    // surface that, and tell the host to (re)create the resource on key changes.
     if matches!(policy, CachePolicy::Gemini { .. }) && content_key.is_some() {
-        notes.push(
-            "gemini: create or refresh the CachedContent resource when content_key changes"
-                .to_string(),
-        );
+        notes.push(format!(
+            "gemini: caching minimums are model-dependent; `cacheable` uses the ~{min_cacheable}-token floor — confirm your model's actual minimum. Create or refresh the CachedContent resource when content_key changes."
+        ));
     }
 
     CachePlan {

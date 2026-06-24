@@ -67,7 +67,9 @@ const PAYLOAD_MARKER: &str = "ogham_ccr_payload";
 
 /// Serialize a payload into a self-describing JSON envelope. UTF-8 bytes are
 /// stored verbatim; binary bytes are hex-encoded so any payload round-trips.
-fn encode_payload(payload: &CcrPayload) -> String {
+/// Shared with the native backends, which keep this rollback-safe envelope for
+/// UTF-8 payloads (no hex penalty) and store only binary payloads natively.
+pub(crate) fn encode_payload(payload: &CcrPayload) -> String {
     let (enc, data) = match std::str::from_utf8(&payload.bytes) {
         Ok(text) => ("utf8", text.to_string()),
         Err(_) => ("hex", to_hex(&payload.bytes)),

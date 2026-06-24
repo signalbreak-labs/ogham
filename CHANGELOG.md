@@ -9,13 +9,16 @@ versions may contain breaking changes).
 
 ### Added
 
-- Native binary CCR payload storage in the persistent backends. The SQLite store
-  now keeps a `CcrPayload` in native BLOB + `media_type`/`metadata` columns
-  (added by an idempotent migration on open), and the fjall store in a compact
-  length-prefixed binary frame — so binary payloads (e.g. images) cost their
-  real size instead of the previous hex-encoded text envelope. Both fall back to
-  the shared text decoder for plain `save`s and legacy envelopes, so existing
-  databases keep working unchanged.
+- Native binary CCR payload storage in the persistent backends, for *binary*
+  payloads only. A UTF-8 `CcrPayload` keeps the self-describing text envelope
+  (no hex penalty, and readable by older binaries), while a binary payload (e.g.
+  an image) is stored natively — SQLite in `media_type`/`metadata` columns plus a
+  raw BLOB (added by an idempotent migration on open), fjall in a compact
+  length-prefixed frame whose magic begins with `0xFF` so it can never collide
+  with a UTF-8 `save` value — so binary costs its real size instead of a 2x hex
+  envelope. Reads fail closed: a binary payload fetched through the text
+  `retrieve()` API, a corrupt native frame, or a SQLite read/metadata error all
+  return `StoreError` rather than silently empty or lossy content.
 
 ### Changed
 

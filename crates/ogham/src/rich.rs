@@ -552,10 +552,9 @@ fn recount_rich_cache_plan(
         });
     }
     if matches!(policy, CachePolicy::Gemini { .. }) && plan.content_key.is_some() {
-        plan.notes.push(
-            "gemini: create or refresh the CachedContent resource when content_key changes"
-                .to_string(),
-        );
+        plan.notes.push(format!(
+            "gemini: caching minimums are model-dependent; `cacheable` uses the ~{min_cacheable}-token floor — confirm your model's actual minimum. Create or refresh the CachedContent resource when content_key changes."
+        ));
     }
 }
 
