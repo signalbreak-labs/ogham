@@ -148,10 +148,12 @@ pub fn render_cache_control(messages: &[Message]) -> AnthropicMessages {
 pub fn render_cache_control_rich(messages: &[RichMessage]) -> AnthropicMessages {
     let mut system = Vec::new();
     let mut turns = Vec::new();
-    // Tool-call ids from the immediately preceding assistant turn that a
-    // `tool_result` in the next user turn may answer. Anthropic requires tool
-    // results to immediately follow their tool_use, so this is reset on every
-    // message — only the directly-following user turn can consume them.
+    // Tool-call ids from the preceding assistant turn that a `tool_result` may
+    // answer. An assistant turn resets it to exactly that turn's tool_use ids;
+    // user/tool turns consume from it (so parallel results delivered across
+    // several consecutive tool-role messages all resolve); a system turn clears
+    // it. So only results that follow their tool_use (before the next assistant
+    // turn) render natively.
     let mut pending_tool_use: HashSet<String> = HashSet::new();
     for m in messages {
         // Anthropic role: system goes to the top-level field; assistant stays
@@ -216,13 +218,15 @@ fn render_assistant_content(content: &MessageContent, pending: &mut HashSet<Stri
 }
 
 /// Render a user turn. A `tool_result` is native only if it answers an
-/// outstanding tool_use from the immediately preceding assistant turn (consumed
-/// so duplicates demote); all native results are emitted *before* any other
-/// block, as Anthropic requires. Everything else — orphan/duplicate results, a
-/// misplaced `tool_use` — is linearized to text. `pending` is cleared after, so
-/// only this directly-following turn can answer the tool uses.
+/// outstanding tool_use from the preceding assistant turn (consumed so
+/// duplicates demote); all native results are emitted *before* any other block,
+/// as Anthropic requires. Everything else — orphan/duplicate results, a
+/// misplaced `tool_use` — is linearized to text. `pending` is **not** cleared
+/// here: a host may deliver the results of one parallel-tool-call turn as
+/// several consecutive tool-role messages, so outstanding ids stay answerable
+/// until the next assistant/system turn resets them.
 fn render_user_content(content: &MessageContent, pending: &mut HashSet<String>) -> Vec<Value> {
-    let rendered = match content {
+    match content {
         MessageContent::Text(text) => vec![json!({ "type": "text", "text": text })],
         MessageContent::Blocks(blocks) => {
             let mut results = Vec::new();
@@ -249,9 +253,7 @@ fn render_user_content(content: &MessageContent, pending: &mut HashSet<String>) 
             results.extend(others);
             results
         }
-    };
-    pending.clear();
-    rendered
+    }
 }
 
 /// Render a system message's content. System content is text; any stray tool
@@ -685,6 +687,35 @@ mod tests {
                 .unwrap()
                 .contains("[tool_result for call_1]")
         );
+    }
+
+    #[test]
+    fn parallel_tool_results_across_consecutive_messages_render_native() {
+        // One assistant turn makes two tool calls; the host delivers each result
+        // as its own consecutive tool-role message. Both must render natively.
+        let assistant = RichMessage::blocks(
+            "assistant",
+            vec![
+                ContentBlock::ToolUse {
+                    id: "a".into(),
+                    name: "shell".into(),
+                    input: json!({}),
+                },
+                ContentBlock::ToolUse {
+                    id: "b".into(),
+                    name: "editor".into(),
+                    input: json!({}),
+                },
+            ],
+        );
+        let result_a = RichMessage::blocks("tool", vec![tool_result_block("a", "ra")]);
+        let result_b = RichMessage::blocks("tool", vec![tool_result_block("b", "rb")]);
+        let rendered = render_cache_control_rich(&[assistant, result_a, result_b]);
+        assert_eq!(rendered.messages.len(), 3);
+        assert_eq!(rendered.messages[1]["content"][0]["type"], "tool_result");
+        assert_eq!(rendered.messages[1]["content"][0]["tool_use_id"], "a");
+        assert_eq!(rendered.messages[2]["content"][0]["type"], "tool_result");
+        assert_eq!(rendered.messages[2]["content"][0]["tool_use_id"], "b");
     }
 
     #[test]

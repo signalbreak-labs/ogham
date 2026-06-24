@@ -304,6 +304,19 @@ pub async fn compact_rich(
         dropped,
         counter.as_ref(),
     );
+    // build_fold_records tags from the flat projection, which loses rich-native
+    // signals (tool-call names, errored tool results). Merge those back from the
+    // original rich messages so a cascade-folded tool call stays findable by
+    // tool/error during recovery — parity with the block-compression path.
+    for fold in &mut folds {
+        let range = fold.original_range.clone();
+        if range.end <= messages.len() {
+            for rich in &messages[range] {
+                fold.tags
+                    .merge(crate::fold_tags::extract_fold_tags_rich(rich));
+            }
+        }
+    }
     let mut cache_plan = apply_cache_policy(
         &mut working,
         config.cache,

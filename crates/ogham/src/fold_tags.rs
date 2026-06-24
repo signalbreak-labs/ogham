@@ -92,6 +92,23 @@ impl FoldTags {
             .iter()
             .any(|v| v.eq_ignore_ascii_case(value))
     }
+
+    /// Merge `other` into this set (union per category, re-sorted/deduped/capped).
+    pub fn merge(&mut self, other: FoldTags) {
+        if other.is_empty() {
+            return;
+        }
+        let merge_into = |a: &mut Vec<String>, mut b: Vec<String>| {
+            if b.is_empty() {
+                return;
+            }
+            a.append(&mut b);
+            *a = sorted_unique_capped(std::mem::take(a));
+        };
+        merge_into(&mut self.tool_names, other.tool_names);
+        merge_into(&mut self.error_classes, other.error_classes);
+        merge_into(&mut self.file_paths, other.file_paths);
+    }
 }
 
 /// Extract structured tags from a fold's original messages.
@@ -261,6 +278,30 @@ mod tests {
     use super::*;
     use crate::agent::ERROR_PATTERNS;
     use ogham_core::ImageSource;
+
+    #[test]
+    fn merge_unions_sorts_and_dedups() {
+        // The cascade retag path merges rich-native tags into flat-derived ones;
+        // the result is the union, sorted, deduped, and capped per category.
+        let mut a = FoldTags {
+            tool_names: vec!["shell".into()],
+            file_paths: vec!["src/main.rs".into()],
+            ..FoldTags::default()
+        };
+        a.merge(FoldTags {
+            tool_names: vec!["editor".into(), "shell".into()], // overlap dedups
+            error_classes: vec!["tool_error".into()],          // new category
+            ..FoldTags::default()
+        });
+        assert_eq!(a.tool_names, vec!["editor", "shell"]);
+        assert_eq!(a.error_classes, vec!["tool_error"]);
+        assert_eq!(a.file_paths, vec!["src/main.rs"]);
+
+        // Merging an empty set is a no-op.
+        let before = a.clone();
+        a.merge(FoldTags::default());
+        assert_eq!(a, before);
+    }
 
     #[test]
     fn rich_extractor_captures_native_tool_and_error_tags() {
