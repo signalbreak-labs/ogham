@@ -7,6 +7,8 @@ versions may contain breaking changes).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-23
+
 ### Added
 
 - Richer Anthropic rendering: `providers::anthropic::render_cache_control_rich`

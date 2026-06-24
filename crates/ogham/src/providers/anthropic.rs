@@ -126,9 +126,11 @@ pub fn render_cache_control(messages: &[Message]) -> AnthropicMessages {
 /// preserving native Anthropic content blocks instead of flattening to text.
 ///
 /// Each [`ContentBlock`] maps to its Anthropic shape: text → `text`, tool calls
-/// → `tool_use`, tool results → `tool_result` (with nested content rendered
-/// recursively), images → `image` (base64 or url source). Two blocks have no
-/// native Anthropic input shape and are rendered as `text` so their content
+/// → `tool_use`, tool results → `tool_result`, images → `image` (base64 or url
+/// source). A `tool_result`'s nested content is rendered with the restricted set
+/// Anthropic allows there (`text`/`image` only); a nested `tool_use` or
+/// `tool_result` is linearized to `text` so the payload stays valid. Two blocks
+/// have no native Anthropic input shape and render as `text` so their content
 /// still reaches the model: `Thinking` (a replayable `thinking` block requires
 /// the original provider signature, which the host-neutral model does not
 /// carry) and `Reference` (rendered as `[kind: id_or_path]`).
@@ -193,7 +195,11 @@ fn render_block(block: &ContentBlock) -> Value {
             is_error,
             content,
         } => {
-            let nested: Vec<Value> = content.iter().map(render_block).collect();
+            // Anthropic only permits `text` and `image` blocks inside a
+            // `tool_result`. Render nested content with the restricted renderer
+            // so a nested `tool_use`/`tool_result` (or thinking/reference) can
+            // never produce a provider-invalid payload.
+            let nested: Vec<Value> = content.iter().map(render_tool_result_block).collect();
             json!({
                 "type": "tool_result",
                 "tool_use_id": tool_use_id,
@@ -204,6 +210,30 @@ fn render_block(block: &ContentBlock) -> Value {
         ContentBlock::Reference {
             kind, id_or_path, ..
         } => json!({ "type": "text", "text": format!("[{kind}: {id_or_path}]") }),
+    }
+}
+
+/// Render a block that appears *inside* a `tool_result`, where Anthropic only
+/// accepts `text` and `image`. Native-invalid nested blocks (`tool_use`, a
+/// nested `tool_result`, `thinking`, `reference`) are linearized to a `text`
+/// block so the request stays valid.
+fn render_tool_result_block(block: &ContentBlock) -> Value {
+    match block {
+        ContentBlock::Text { text } | ContentBlock::Thinking { text } => {
+            json!({ "type": "text", "text": text })
+        }
+        ContentBlock::Image { source, .. } => {
+            json!({ "type": "image", "source": render_image_source(source) })
+        }
+        ContentBlock::Reference {
+            kind, id_or_path, ..
+        } => json!({ "type": "text", "text": format!("[{kind}: {id_or_path}]") }),
+        ContentBlock::ToolUse { id, name, .. } => {
+            json!({ "type": "text", "text": format!("[tool_use {name} ({id})]") })
+        }
+        ContentBlock::ToolResult { tool_use_id, .. } => {
+            json!({ "type": "text", "text": format!("[tool_result for {tool_use_id}]") })
+        }
     }
 }
 
@@ -391,6 +421,56 @@ mod tests {
         assert_eq!(tr["is_error"], false);
         assert_eq!(tr["content"][0]["type"], "text");
         assert_eq!(tr["content"][0]["text"], "a.txt b.txt");
+    }
+
+    #[test]
+    fn tool_result_linearizes_provider_invalid_nested_blocks() {
+        // A tool_result whose nested content includes blocks Anthropic does not
+        // allow there (tool_use, nested tool_result) must not emit them verbatim.
+        let tool = RichMessage::blocks(
+            "tool",
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".into(),
+                is_error: false,
+                content: vec![
+                    ContentBlock::Text { text: "ok".into() },
+                    ContentBlock::ToolUse {
+                        id: "nested".into(),
+                        name: "evil".into(),
+                        input: json!({}),
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id: "deep".into(),
+                        is_error: true,
+                        content: vec![],
+                    },
+                    ContentBlock::Image {
+                        source: ImageSource::Url {
+                            url: "https://x/y.png".into(),
+                        },
+                        alt: None,
+                    },
+                ],
+            }],
+        );
+        let rendered = render_cache_control_rich(&[tool]);
+        let nested = &rendered.messages[0]["content"][0]["content"];
+        // Only text and image survive as native shapes; tool_use/tool_result
+        // are linearized to text.
+        assert_eq!(nested[0]["type"], "text");
+        assert_eq!(nested[0]["text"], "ok");
+        assert_eq!(nested[1]["type"], "text");
+        assert_eq!(nested[1]["text"], "[tool_use evil (nested)]");
+        assert_eq!(nested[2]["type"], "text");
+        assert_eq!(nested[2]["text"], "[tool_result for deep]");
+        assert_eq!(nested[3]["type"], "image");
+        // No nested tool_use / tool_result blocks leak through.
+        let blocks = nested.as_array().unwrap();
+        assert!(
+            blocks
+                .iter()
+                .all(|b| b["type"] == "text" || b["type"] == "image")
+        );
     }
 
     #[test]
