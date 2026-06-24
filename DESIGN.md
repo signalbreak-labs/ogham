@@ -14,6 +14,14 @@
 self-contained: exact file paths, exact signatures, exact behavior, exact tests, exact
 done-criteria. Do not invent APIs that are not specified here.
 
+> **Historical record (read with care).** This is the original build plan; it
+> predates several later additions — `ContextSession`, `compact_rich` / the rich
+> content model, searchable fold recall and structured fold tags, provider cache
+> planning (OpenAI/Gemini/Anthropic), the 0.4 lean-default feature split, native
+> binary CCR payload storage, and the BLAKE3 CCR keys (see ADR-9 below). For the
+> current shipped surface see `CHANGELOG.md`, `ROADMAP.md`, and `docs/`; where
+> this document conflicts with those, those win.
+
 ---
 
 ## How to Use This Document
@@ -1411,6 +1419,14 @@ interop surface.
 CCR keys are content addresses for dedup/lookup, not security boundaries. MD5 is
 deterministic, fast, and already shipped (`ccr::compute_key`). Do not "upgrade" it —
 changing the hash breaks every stored marker.
+
+> **Superseded (0.4).** `ccr::compute_key` now returns a **versioned, BLAKE3**
+> content address of the form `b3:<32 hex>` (a 128-bit prefix). The reasoning
+> above held — content addresses are not security boundaries — but a versioned
+> scheme was chosen so the hash *can* evolve without ambiguity: the `b3:` tag
+> means ids stored under an older scheme stay retrievable by their literal id,
+> so a future change does not break existing markers. The `md5` crate is still a
+> dependency, but only for the adaptive sizer's bigram digests, not CCR keys.
 
 ---
 
