@@ -845,6 +845,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recall_merges_tags_for_repeated_identical_originals() {
+        use crate::fold_tags::FoldTagKind;
+
+        let store: Arc<dyn CcrStore> = Arc::new(InMemoryCcrStore::unbounded());
+        let mut s = session_with_budget(store, 220);
+        let same = "IDENTICAL_TOOL_OUTPUT_LINE\n".repeat(60);
+
+        s.push(Message::new("system", "sys"));
+        s.push(tool_msg("shell", same.clone()));
+        s.push(Message::new("user", "a"));
+        s.compact().await.unwrap();
+
+        s.push(tool_msg("editor", same));
+        s.push(Message::new("user", "b"));
+        s.compact().await.unwrap();
+
+        assert_eq!(
+            s.folds()
+                .iter()
+                .filter_map(|f| f.ccr_id.as_ref())
+                .collect::<HashSet<_>>()
+                .len(),
+            1,
+            "identical originals share one CCR id"
+        );
+        assert!(
+            !s.recall()
+                .find_by_tag(FoldTagKind::ToolName, "shell")
+                .is_empty(),
+            "the first fold's tool tag remains queryable"
+        );
+        assert!(
+            !s.recall()
+                .find_by_tag(FoldTagKind::ToolName, "editor")
+                .is_empty(),
+            "the second fold's tool tag is queryable too"
+        );
+    }
+
+    #[tokio::test]
     async fn eviction_removes_content_from_recall() {
         let store: Arc<dyn CcrStore> = Arc::new(InMemoryCcrStore::unbounded());
         let mut s = ContextSession::new(SessionConfig {

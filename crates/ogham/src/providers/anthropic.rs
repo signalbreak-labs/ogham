@@ -247,13 +247,24 @@ pub fn render_cache_control_rich(messages: &[RichMessage]) -> AnthropicMessages 
             Side::Assistant => "assistant",
             Side::User => "user",
         };
-        turns.push(json!({ "role": role, "content": blocks }));
+        push_turn(&mut turns, role, blocks);
     }
 
     AnthropicMessages {
         system,
         messages: turns,
     }
+}
+
+fn push_turn(turns: &mut Vec<Value>, role: &str, blocks: Vec<Value>) {
+    if let Some(last) = turns.last_mut()
+        && last["role"] == role
+        && let Some(content) = last["content"].as_array_mut()
+    {
+        content.extend(blocks);
+        return;
+    }
+    turns.push(json!({ "role": role, "content": blocks }));
 }
 
 fn collect_tool_use_ids(seg: &Segment) -> HashSet<String> {
@@ -1021,6 +1032,46 @@ mod tests {
         let content = &rendered.messages[0]["content"];
         assert!(content[0].get("cache_control").is_none());
         assert_eq!(content[1]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn skipped_empty_segment_does_not_break_role_alternation() {
+        // Empty rich block messages render to no content and are skipped. If an
+        // empty assistant segment sits between two user segments, the final
+        // Anthropic `messages` array must still alternate by coalescing the
+        // adjacent rendered user turns.
+        let first = RichMessage::text("user", "first");
+        let empty_assistant = RichMessage::blocks("assistant", vec![]);
+        let second = RichMessage::text("user", "second");
+
+        let rendered = render_cache_control_rich(&[first, empty_assistant, second]);
+
+        assert_eq!(rendered.messages.len(), 1);
+        assert_eq!(rendered.messages[0]["role"], "user");
+        let content = rendered.messages[0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["text"], "first");
+        assert_eq!(content[1]["text"], "second");
+    }
+
+    #[test]
+    fn coalescing_after_empty_segment_preserves_safe_cache_boundary() {
+        // The first user message is the stable boundary, then an empty assistant
+        // segment is skipped, then volatile user content follows. Coalescing the
+        // rendered user turns must keep the breakpoint on the stable block, not
+        // move it to the volatile tail.
+        let mut stable = RichMessage::text("user", "stable");
+        stable.metadata.insert(
+            meta_keys::CACHE_CONTROL.to_string(),
+            "ephemeral".to_string(),
+        );
+        let empty_assistant = RichMessage::blocks("assistant", vec![]);
+        let volatile = RichMessage::text("user", "volatile");
+
+        let rendered = render_cache_control_rich(&[stable, empty_assistant, volatile]);
+
+        let content = rendered.messages[0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["cache_control"]["type"], "ephemeral");
+        assert!(content[1].get("cache_control").is_none());
     }
 
     #[test]

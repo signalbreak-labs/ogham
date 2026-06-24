@@ -80,10 +80,10 @@ impl RecallIndex {
 
     /// Index a piece of folded content's original `text`, addressable by
     /// `ccr_id`, with its structured `tags`. Re-indexing the same id replaces
-    /// the prior entry.
+    /// the prior text/statistics and merges tags, so repeated identical content
+    /// stays findable by every fold-level tag observed for that CCR id.
     pub fn index(&mut self, ccr_id: impl Into<String>, kind: FoldKind, tags: FoldTags, text: &str) {
         let ccr_id = ccr_id.into();
-        self.remove(&ccr_id);
 
         let mut terms: HashMap<String, usize> = HashMap::new();
         let mut len = 0usize;
@@ -91,14 +91,20 @@ impl RecallIndex {
             *terms.entry(term).or_default() += 1;
             len += 1;
         }
-        self.docs.push(Doc {
+        let mut doc = Doc {
             ccr_id,
             kind,
             tags,
             preview: preview(text),
             terms,
             len,
-        });
+        };
+        if let Some(existing) = self.docs.iter_mut().find(|d| d.ccr_id == doc.ccr_id) {
+            doc.tags.merge(std::mem::take(&mut existing.tags));
+            *existing = doc;
+        } else {
+            self.docs.push(doc);
+        }
     }
 
     /// Remove the document for `ccr_id`, if present (e.g. when its original was
@@ -374,6 +380,47 @@ mod tests {
         assert_eq!(idx.len(), 1);
         assert!(idx.search("apples", 5).is_empty());
         assert_eq!(idx.search("oranges", 5).len(), 1);
+    }
+
+    #[test]
+    fn reindexing_same_id_merges_tags() {
+        let mut idx = RecallIndex::new();
+        idx.index(
+            "b3:same",
+            FoldKind::Cleared,
+            FoldTags {
+                tool_names: vec!["shell".to_string()],
+                ..FoldTags::default()
+            },
+            "identical payload",
+        );
+        idx.index(
+            "b3:same",
+            FoldKind::Cleared,
+            FoldTags {
+                tool_names: vec!["editor".to_string()],
+                file_paths: vec!["src/lib.rs".to_string()],
+                ..FoldTags::default()
+            },
+            "identical payload",
+        );
+
+        assert_eq!(idx.len(), 1);
+        assert_eq!(
+            idx.find_by_tag(FoldTagKind::ToolName, "shell").len(),
+            1,
+            "the first fold's tag remains queryable"
+        );
+        let editor = idx.find_by_tag(FoldTagKind::ToolName, "editor");
+        assert_eq!(editor.len(), 1);
+        assert_eq!(
+            editor[0].tags.tool_names,
+            vec!["editor".to_string(), "shell".to_string()]
+        );
+        assert_eq!(
+            idx.find_by_tag(FoldTagKind::FilePath, "src/lib.rs").len(),
+            1
+        );
     }
 
     #[test]

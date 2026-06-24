@@ -146,7 +146,7 @@ exact counters and 5% for estimates. Enable the `tiktoken` feature for exact
 OpenAI counts:
 
 ```toml
-ogham = { git = "https://github.com/signalbreak-labs/ogham", tag = "v0.3.0", features = ["tiktoken"] }
+ogham = { git = "https://github.com/signalbreak-labs/ogham", tag = "v0.4.0", features = ["tiktoken"] }
 ```
 
 ## Configuration mapping example

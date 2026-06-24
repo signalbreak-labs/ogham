@@ -134,6 +134,16 @@ versions may contain breaking changes).
   `DefaultCompressionPipeline::with_builtin_compressors()` for explicit,
   allowlist-driven pipeline construction.
 
+### Fixed
+
+- `render_cache_control_rich` now coalesces rendered same-role turns after
+  skipping empty rich segments, preserving Anthropic role alternation and keeping
+  any cache breakpoint on the stable block instead of moving it past volatile
+  content.
+- `RecallIndex` now merges structured tags when repeated identical folds share a
+  CCR id, so tag queries remain valid for every observed fold-level tool/error/
+  path tag while the index still stores one retrievable original per CCR id.
+
 ### Changed
 
 - **BREAKING (0.4):** the `ccr-sqlite` and `ccr-fjall` features are no longer in
@@ -320,7 +330,8 @@ Design substantially derived from
 [Headroom](https://github.com/chopratejas/headroom) (Apache-2.0) — see
 [NOTICE](NOTICE).
 
-[Unreleased]: https://github.com/signalbreak-labs/ogham/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/signalbreak-labs/ogham/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/signalbreak-labs/ogham/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/signalbreak-labs/ogham/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/signalbreak-labs/ogham/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/signalbreak-labs/ogham/compare/v0.2.0...v0.2.1
