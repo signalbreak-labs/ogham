@@ -13,20 +13,51 @@
 //! is append-only, so undo/UI references stay stable across turns, and the
 //! finalized region stays byte-stable, which preserves provider prompt-cache
 //! reuse.
+//!
+//! ## Durability and growth
+//!
+//! Finalized stubs accumulate. With the default [`RetentionPolicy::KeepAll`]
+//! they are kept forever — use a non-evicting store
+//! ([`crate::ccr::in_memory::InMemoryCcrStore::unbounded`]) so a referenced
+//! original is never silently dropped. [`RetentionPolicy::EvictFinalized`]
+//! bounds the prompt by evicting the oldest finalized stubs and garbage-collects
+//! their CCR originals — but only ones no live marker still references, so
+//! reversibility holds for everything still in the prompt.
 
 use crate::agent::AgentPolicy;
 use crate::budget::ContextBudget;
+use crate::ccr::referenced_ccr_ids;
 use crate::compact::{
     CachePlan, CachePolicy, CcrPolicy, CompactConfig, CompressionPolicy, FoldRecord,
     compact_conversation,
 };
 use crate::token_counter::counter_for_model;
 use ogham_core::{Message, Result, meta_keys};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 /// Metadata flag marking a message the session has finalized (folded). Finalized
 /// messages are pinned and never reprocessed by a later [`ContextSession::compact`].
 pub const SESSION_FINALIZED: &str = "ogham.session.finalized";
+
+/// How a session bounds the growth of its finalized (folded) stubs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RetentionPolicy {
+    /// Keep every finalized stub and CCR original forever (durable, unbounded).
+    /// Use a non-evicting store ([`crate::ccr::in_memory::InMemoryCcrStore::unbounded`])
+    /// so referenced originals are never silently dropped.
+    #[default]
+    KeepAll,
+    /// Keep at most `max_finalized` finalized stubs in the prompt; evict the
+    /// oldest beyond that. When `evict_originals`, also delete an evicted stub's
+    /// CCR original — but only when no live marker still references it (so a
+    /// referenced original is never deleted).
+    EvictFinalized {
+        /// Maximum number of finalized stubs to keep in the working prompt.
+        max_finalized: usize,
+        /// Garbage-collect the CCR originals of evicted, unreferenced stubs.
+        evict_originals: bool,
+    },
+}
 
 /// Configuration for a [`ContextSession`].
 #[derive(Clone, Default)]
@@ -41,6 +72,8 @@ pub struct SessionConfig {
     pub cache: CachePolicy,
     /// Model id used for token counting and compressor routing.
     pub model: Option<String>,
+    /// How to bound the growth of finalized stubs across turns.
+    pub retention: RetentionPolicy,
 }
 
 /// What one [`ContextSession::compact`] produced.
@@ -52,6 +85,8 @@ pub struct SessionStep {
     pub tokens: usize,
     /// Provider cache plan for the compacted output (finalized region is stable).
     pub cache_plan: CachePlan,
+    /// CCR ids garbage-collected this step (evicted, unreferenced originals).
+    pub evicted: Vec<String>,
 }
 
 /// A stateful, incremental view of a conversation that compacts append-only.
@@ -138,13 +173,73 @@ impl ContextSession {
         }
         self.folds.extend(new_folds.iter().cloned());
 
+        let evicted = self.apply_retention().await?;
+
         let counter = counter_for_model(self.config.model.as_deref().unwrap_or("default"));
         let tokens = counter.count_messages(&self.messages);
         Ok(SessionStep {
             new_folds,
             tokens,
             cache_plan: result.cache_plan,
+            evicted,
         })
+    }
+
+    /// Bound finalized-stub growth per the retention policy. Evicts the oldest
+    /// finalized stubs beyond the cap from the prompt and, when configured,
+    /// garbage-collects their CCR originals — but never an original a remaining
+    /// live marker still references. Returns the deleted CCR ids.
+    async fn apply_retention(&mut self) -> Result<Vec<String>> {
+        let RetentionPolicy::EvictFinalized {
+            max_finalized,
+            evict_originals,
+        } = self.config.retention
+        else {
+            return Ok(Vec::new());
+        };
+
+        let finalized: Vec<usize> = self
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| is_finalized(m))
+            .map(|(i, _)| i)
+            .collect();
+        if finalized.len() <= max_finalized {
+            return Ok(Vec::new());
+        }
+
+        // Evict the oldest (lowest-index) finalized stubs beyond the cap.
+        let evict_count = finalized.len() - max_finalized;
+        let to_remove: BTreeSet<usize> = finalized.into_iter().take(evict_count).collect();
+
+        let mut removed = Vec::with_capacity(to_remove.len());
+        let mut kept = Vec::with_capacity(self.messages.len() - to_remove.len());
+        for (i, msg) in std::mem::take(&mut self.messages).into_iter().enumerate() {
+            if to_remove.contains(&i) {
+                removed.push(msg);
+            } else {
+                kept.push(msg);
+            }
+        }
+        self.messages = kept;
+
+        if !evict_originals {
+            return Ok(Vec::new());
+        }
+        let CcrPolicy::Store(store) = &self.config.ccr else {
+            return Ok(Vec::new());
+        };
+        // Delete a removed stub's original only if nothing still references it.
+        let still_referenced = referenced_ccr_ids(&self.messages);
+        let mut evicted = Vec::new();
+        for id in referenced_ccr_ids(&removed) {
+            if !still_referenced.contains(&id) {
+                store.delete(&id).await?;
+                evicted.push(id);
+            }
+        }
+        Ok(evicted)
     }
 
     /// Retrieve a CCR original by id (delegates to the configured store).
@@ -406,5 +501,88 @@ mod tests {
             step.new_folds.iter().any(|f| f.kind == FoldKind::Cleared),
             "the second clear must appear in this step's delta"
         );
+    }
+
+    #[tokio::test]
+    async fn evict_finalized_bounds_stubs_and_gcs_unreferenced_originals() {
+        let store: Arc<dyn CcrStore> = Arc::new(InMemoryCcrStore::unbounded());
+        let mut s = ContextSession::new(SessionConfig {
+            budget: Some(ContextBudget {
+                total_limit: 200,
+                safety_margin: Some(0.0),
+            }),
+            agent_policy: AgentPolicy {
+                keep_recent_tool_results: 0,
+                clear_old_tool_results: true,
+                keep_recent_assistant: 1,
+                protected_tail_tokens: None,
+            },
+            ccr: CcrPolicy::Store(store.clone()),
+            retention: RetentionPolicy::EvictFinalized {
+                max_finalized: 2,
+                evict_originals: true,
+            },
+            ..Default::default()
+        });
+
+        s.push(Message::new("system", "sys"));
+        let mut cleared_ids = Vec::new();
+        let mut evicted_total = Vec::new();
+        for turn in 0..6 {
+            s.push(tool_msg("shell", big_output(turn)));
+            s.push(Message::new("user", format!("q{turn}")));
+            let step = s.compact().await.unwrap();
+            for fold in step
+                .new_folds
+                .iter()
+                .filter(|f| f.kind == FoldKind::Cleared)
+            {
+                if let Some(id) = &fold.ccr_id {
+                    cleared_ids.push(id.clone());
+                }
+            }
+            evicted_total.extend(step.evicted);
+        }
+
+        // The prompt holds at most `max_finalized` finalized stubs.
+        let finalized = s.messages().iter().filter(|m| is_finalized(m)).count();
+        assert!(
+            finalized <= 2,
+            "finalized stubs must be bounded to max_finalized, got {finalized}"
+        );
+        // Old originals were garbage-collected.
+        assert!(!evicted_total.is_empty(), "old originals must be evicted");
+        // The earliest cleared original is gone (evicted, unreferenced).
+        assert!(
+            s.retrieve(&cleared_ids[0]).await.unwrap().is_none(),
+            "the oldest cleared original must be GC'd"
+        );
+        // A recent cleared original is still referenced by a live stub → retained.
+        let recent = cleared_ids.last().unwrap();
+        assert!(
+            s.retrieve(recent).await.unwrap().is_some(),
+            "a referenced original must never be evicted (durability)"
+        );
+    }
+
+    #[tokio::test]
+    async fn keep_all_retention_evicts_nothing() {
+        let store: Arc<dyn CcrStore> = Arc::new(InMemoryCcrStore::unbounded());
+        let mut s = session_with_budget(store, 200);
+        s.push(Message::new("system", "sys"));
+        for turn in 0..5 {
+            s.push(tool_msg("shell", big_output(turn)));
+            s.push(Message::new("user", format!("q{turn}")));
+            let step = s.compact().await.unwrap();
+            assert!(
+                step.evicted.is_empty(),
+                "KeepAll must never evict an original"
+            );
+        }
+        // Every cleared original remains retrievable under the default policy.
+        for fold in s.folds().iter().filter(|f| f.kind == FoldKind::Cleared) {
+            let id = fold.ccr_id.as_ref().unwrap();
+            assert!(s.retrieve(id).await.unwrap().is_some());
+        }
     }
 }

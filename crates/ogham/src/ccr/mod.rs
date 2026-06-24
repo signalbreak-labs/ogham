@@ -5,8 +5,8 @@ pub mod in_memory;
 pub mod sqlite;
 
 use async_trait::async_trait;
-use ogham_core::Result;
-use std::collections::HashMap;
+use ogham_core::{Message, Result, meta_keys};
+use std::collections::{BTreeSet, HashMap};
 
 /// A typed CCR payload: raw bytes plus a media type and optional metadata.
 ///
@@ -162,6 +162,38 @@ pub fn marker_for(hash: &str) -> String {
     format!("<<ccr:{hash}>>")
 }
 
+/// Collect the CCR ids a message list still references — via `<<ccr:ID>>`
+/// markers in message content and `meta_keys::CCR_ID` metadata.
+///
+/// This is the live set for garbage collection: an original whose id is not in
+/// this set is no longer reachable from the working prompt and may be evicted
+/// without breaking a live marker.
+pub fn referenced_ccr_ids(messages: &[Message]) -> BTreeSet<String> {
+    let mut ids = BTreeSet::new();
+    for message in messages {
+        if let Some(id) = message.metadata.get(meta_keys::CCR_ID) {
+            ids.insert(id.clone());
+        }
+        collect_markers(&message.content, &mut ids);
+    }
+    ids
+}
+
+/// Extract every `<<ccr:ID>>` marker id embedded in `content`.
+fn collect_markers(content: &str, ids: &mut BTreeSet<String>) {
+    let mut rest = content;
+    while let Some(start) = rest.find("<<ccr:") {
+        let after = &rest[start + "<<ccr:".len()..];
+        match after.find(">>") {
+            Some(end) => {
+                ids.insert(after[..end].to_string());
+                rest = &after[end + 2..];
+            }
+            None => break,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,6 +223,29 @@ mod tests {
     #[test]
     fn marker_format() {
         assert_eq!(marker_for("abc123"), "<<ccr:abc123>>");
+    }
+
+    #[test]
+    fn referenced_ids_collects_markers_and_metadata() {
+        let mut m1 = Message::new("tool", "[tool:x] result cleared — via <<ccr:b3:aaa>>");
+        m1.metadata
+            .insert(meta_keys::CCR_ID.to_string(), "b3:aaa".to_string());
+        // Multiple markers in one message.
+        let m2 = Message::new(
+            "tool",
+            r#"[{"_ccr_dropped":"<<ccr:b3:bbb>>"},{"x":"<<ccr:b3:ccc>>"}]"#,
+        );
+        let m3 = Message::new("user", "no markers here");
+
+        let ids = referenced_ccr_ids(&[m1, m2, m3]);
+        assert_eq!(
+            ids.into_iter().collect::<Vec<_>>(),
+            vec![
+                "b3:aaa".to_string(),
+                "b3:bbb".to_string(),
+                "b3:ccc".to_string()
+            ]
+        );
     }
 
     #[tokio::test]

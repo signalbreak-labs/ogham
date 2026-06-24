@@ -9,6 +9,14 @@ versions may contain breaking changes).
 
 ### Added
 
+- Durable CCR retention and stub-eviction: `InMemoryCcrStore::unbounded()` is a
+  non-evicting store (so a referenced original is never silently dropped by
+  capacity/TTL); `ccr::referenced_ccr_ids()` collects the CCR ids a message list
+  still references (markers + metadata); and `ContextSession` gains a
+  `RetentionPolicy` (`KeepAll` default, or `EvictFinalized { max_finalized,
+  evict_originals }`) that bounds finalized-stub growth and garbage-collects the
+  CCR originals of evicted stubs — never one a live marker still references.
+  `SessionStep` gains an `evicted` field listing the GC'd ids.
 - `ContextSession` (`ogham::session`): stateful, incremental conversation
   compaction. `push()` appends turns; `compact()` folds only the active tail and
   freezes already-folded messages (marked finalized + pinned), so each turn does

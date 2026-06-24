@@ -61,6 +61,10 @@ The safety and honesty foundation is in place:
   push turns, compact only the active tail, freeze already-folded messages. Each
   turn's work is proportional to new content, the fold ledger is append-only, and
   the finalized region stays byte-stable for prompt-cache reuse.
+- **Durable CCR lifecycle.** A non-evicting store (`InMemoryCcrStore::unbounded`)
+  keeps referenced originals durable; `ccr::referenced_ccr_ids` computes the live
+  set; and `ContextSession`'s `RetentionPolicy` bounds stub growth by evicting
+  the oldest finalized stubs and garbage-collecting only unreferenced originals.
 - **Honest token counting.** Heuristic estimates carry an explicit safety margin;
   exact OpenAI counts are available behind the `tiktoken` feature. Estimated
   counts are never presented as exact.
