@@ -31,6 +31,7 @@ use crate::compact::{
     CachePlan, CachePolicy, CcrPolicy, CompactConfig, CompressionPolicy, FoldRecord,
     apply_cache_policy, compact_conversation,
 };
+use crate::recall::RecallIndex;
 use crate::token_counter::counter_for_model;
 use ogham_core::{Message, Result, meta_keys};
 use std::collections::{BTreeSet, HashSet};
@@ -98,6 +99,7 @@ pub struct ContextSession {
     config: SessionConfig,
     messages: Vec<Message>,
     folds: Vec<FoldRecord>,
+    recall: RecallIndex,
 }
 
 impl ContextSession {
@@ -107,6 +109,7 @@ impl ContextSession {
             config,
             messages: Vec::new(),
             folds: Vec::new(),
+            recall: RecallIndex::new(),
         }
     }
 
@@ -128,6 +131,12 @@ impl ContextSession {
     /// The append-only fold ledger accumulated across all compactions.
     pub fn folds(&self) -> &[FoldRecord] {
         &self.folds
+    }
+
+    /// The searchable recall index over folded content. Search it by relevance
+    /// to get CCR ids, then [`retrieve`](Self::retrieve) the originals.
+    pub fn recall(&self) -> &crate::recall::RecallIndex {
+        &self.recall
     }
 
     /// Number of messages currently held.
@@ -172,7 +181,30 @@ impl ContextSession {
             }
         }
 
+        // Index newly folded content for searchable recall, using the original
+        // text still held in `self.messages` (reassigned below). Only folds with
+        // a retrievable CCR id are indexed.
+        for fold in &new_folds {
+            let Some(ccr_id) = fold.ccr_id.clone() else {
+                continue;
+            };
+            let text = match self.messages.get(fold.original_range.clone()) {
+                Some(span) => span
+                    .iter()
+                    .map(|m| m.content.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                None => continue,
+            };
+            if !text.is_empty() {
+                self.recall.index(ccr_id, fold.kind, &text);
+            }
+        }
+
         let evicted = self.apply_retention(&mut next_messages).await;
+        for id in &evicted {
+            self.recall.remove(id);
+        }
 
         let counter = counter_for_model(self.config.model.as_deref().unwrap_or("default"));
         let mut warnings = Vec::new();
@@ -711,6 +743,101 @@ mod tests {
         assert!(
             s.retrieve(id).await.unwrap().is_some(),
             "failed GC leaves the original available"
+        );
+    }
+
+    #[tokio::test]
+    async fn recall_finds_folded_content_by_relevance() {
+        // No budget: agent rules clear every old tool result (keep_recent = 0),
+        // so each tool output is folded and indexed regardless of size.
+        let store: Arc<dyn CcrStore> = Arc::new(InMemoryCcrStore::unbounded());
+        let mut s = ContextSession::new(SessionConfig {
+            agent_policy: AgentPolicy {
+                keep_recent_tool_results: 0,
+                clear_old_tool_results: true,
+                keep_recent_assistant: 2,
+                protected_tail_tokens: None,
+            },
+            ccr: CcrPolicy::Store(store),
+            ..Default::default()
+        });
+        s.push(Message::new("system", "sys"));
+
+        // A distinctive tool output that gets cleared and indexed.
+        let auth = "authentication succeeded for user alice in src/auth/login.rs session handler "
+            .repeat(8);
+        s.push(Message::new("assistant", "checking auth"));
+        s.push(tool_msg("shell", auth.clone()));
+        s.push(Message::new("user", "ok"));
+        s.compact().await.unwrap();
+
+        // Several unrelated later turns.
+        for turn in 0..3 {
+            s.push(tool_msg(
+                "shell",
+                format!("database migration step {turn} ").repeat(20),
+            ));
+            s.push(Message::new("user", format!("q{turn}")));
+            s.compact().await.unwrap();
+        }
+
+        let hits = s.recall().search("authentication login src/auth", 5);
+        assert!(!hits.is_empty(), "recall must find the auth fold");
+        let original = s
+            .retrieve(&hits[0].ccr_id)
+            .await
+            .unwrap()
+            .expect("the recalled original must be retrievable");
+        assert!(
+            original.contains("authentication succeeded for user alice"),
+            "recall resolves to the verbatim original"
+        );
+    }
+
+    #[tokio::test]
+    async fn eviction_removes_content_from_recall() {
+        let store: Arc<dyn CcrStore> = Arc::new(InMemoryCcrStore::unbounded());
+        let mut s = ContextSession::new(SessionConfig {
+            budget: Some(ContextBudget {
+                total_limit: 200,
+                safety_margin: Some(0.0),
+            }),
+            agent_policy: AgentPolicy {
+                keep_recent_tool_results: 0,
+                clear_old_tool_results: true,
+                keep_recent_assistant: 1,
+                protected_tail_tokens: None,
+            },
+            ccr: CcrPolicy::Store(store),
+            retention: RetentionPolicy::EvictFinalized {
+                max_finalized: 1,
+                evict_originals: true,
+            },
+            ..Default::default()
+        });
+        s.push(Message::new("system", "sys"));
+        // The oldest distinctive content will be evicted as newer turns arrive.
+        s.push(tool_msg(
+            "shell",
+            "ZEBRAFISH telemetry anomaly report ".repeat(20),
+        ));
+        s.push(Message::new("user", "u0"));
+        s.compact().await.unwrap();
+        for turn in 0..3 {
+            s.push(tool_msg(
+                "shell",
+                format!("routine log line {turn} ").repeat(20),
+            ));
+            s.push(Message::new("user", format!("u{turn}")));
+            s.compact().await.unwrap();
+        }
+
+        // The evicted content is gone from the recall index.
+        assert!(
+            s.recall()
+                .search("zebrafish telemetry anomaly", 5)
+                .is_empty(),
+            "evicted content must be removed from recall"
         );
     }
 }

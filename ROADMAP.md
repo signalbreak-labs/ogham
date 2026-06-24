@@ -68,6 +68,12 @@ The safety and honesty foundation is in place:
 - **Honest token counting.** Heuristic estimates carry an explicit safety margin;
   exact OpenAI counts are available behind the `tiktoken` feature. Estimated
   counts are never presented as exact.
+- **Searchable fold recall.** `ogham::recall::RecallIndex` is a deterministic
+  BM25 keyword index over folded content, addressable by CCR id, so a host can
+  search folds by relevance to recover the ids to retrieve — closing the
+  exact-id-only gap in reversible CCR. `ContextSession` maintains one
+  automatically (index on fold, drop on GC). Pure and deterministic: no
+  embeddings, no network.
 
 ## Roadmap
 
@@ -128,10 +134,13 @@ The safety and honesty foundation is in place:
   trait / feature boundary for aggressive (e.g. LLMLingua-style) compression so
   the default path stays deterministic and zero-network. Require evaluation gates
   before enabling semantic token dropping on tool, error, or system content.
-- **Retrieval-friendly metadata.** Tag folded content and summaries with file
-  paths, command/tool names, error classes, and symbol-like identifiers so host
-  retrieval/memory systems can index them. Ogham integrates with retrieval; it
-  does not become a vector database.
+- **Retrieval-friendly metadata.** A deterministic BM25 recall index over folded
+  content has shipped (`ogham::recall`), and its `extract_terms` already splits
+  out file paths, identifiers, and symbol-like tokens. The remaining work is
+  structured tagging — attaching explicit file paths, command/tool names, and
+  error classes to fold records and summaries — so host retrieval/memory systems
+  can index on typed fields, not just free-text terms. Ogham integrates with
+  retrieval; it does not become a vector database.
 
 ## Context landscape
 

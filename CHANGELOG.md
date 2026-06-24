@@ -9,6 +9,18 @@ versions may contain breaking changes).
 
 ### Added
 
+- Searchable fold recall (`ogham::recall`): a deterministic BM25 keyword index
+  over folded content, addressable by CCR id. Reversible CCR is exact-id-only —
+  you can retrieve an original only if you still hold its `<<ccr:HASH>>` marker —
+  so `RecallIndex` lets a host (or agent) `search()` folded content by relevance
+  to recover the ids to `retrieve()`. It is pure and deterministic (no
+  embeddings, no network); `extract_terms` splits path-like and identifier-like
+  tokens (`src/auth/login.rs` also matches `auth`/`login`/`rs`; `parseToolResult`
+  also matches `parse`/`tool`/`result`). `ContextSession` maintains one
+  automatically — each compaction indexes the original text of newly folded
+  content under its CCR id and drops entries whose originals are
+  garbage-collected — exposed via `ContextSession::recall()`. Re-exports
+  `RecallHit`, `RecallIndex`, and `extract_terms`.
 - Durable CCR retention and stub-eviction: `InMemoryCcrStore::unbounded()` is a
   non-evicting store (so a referenced original is never silently dropped by
   capacity/TTL); `ccr::referenced_ccr_ids()` collects the CCR ids a message list
