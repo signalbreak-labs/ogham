@@ -343,10 +343,8 @@ pub(crate) fn build_fold_records(
                 .and_then(|raw| raw.parse::<usize>().ok())
                 == Some(idx)
         });
-        folds.push(fold_for_span(
-            FoldKind::Dropped,
+        folds.push(fold_for_dropped_span(
             idx..idx + 1,
-            None,
             &original[idx..idx + 1],
             dropped_stub,
             counter,
@@ -380,6 +378,37 @@ fn fold_for_replacement(
         replacement,
         counter,
     )
+}
+
+fn fold_for_dropped_span(
+    original_range: std::ops::Range<usize>,
+    originals: &[Message],
+    dropped_stub: Option<&Message>,
+    counter: &dyn TokenCounter,
+) -> FoldRecord {
+    let mut fold = fold_for_span(
+        FoldKind::Dropped,
+        original_range,
+        None,
+        originals,
+        None,
+        counter,
+    );
+    if let Some(stub) = dropped_stub {
+        fold.marker = extract_ccr_marker(&stub.content);
+        fold.ccr_id = stub.metadata.get(meta_keys::CCR_ID).cloned().or_else(|| {
+            fold.marker.as_ref().map(|marker| {
+                marker
+                    .trim_start_matches("<<ccr:")
+                    .trim_end_matches(">>")
+                    .to_string()
+            })
+        });
+        if let Some(ccr_id) = &fold.ccr_id {
+            fold.id = ccr_id.clone();
+        }
+    }
+    fold
 }
 
 fn fold_for_span(
@@ -810,6 +839,10 @@ mod tests {
             folds[0].ccr_id.as_deref(),
             Some("b3:deadbeef"),
             "a cleared-then-dropped message must keep its CCR pointer in the audit record"
+        );
+        assert_eq!(
+            folds[0].replacement_tokens, 0,
+            "a dropped message has no emitted replacement tokens"
         );
     }
 }

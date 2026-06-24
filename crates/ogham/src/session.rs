@@ -22,6 +22,7 @@ use crate::compact::{
 };
 use crate::token_counter::counter_for_model;
 use ogham_core::{Message, Result, meta_keys};
+use std::collections::HashSet;
 
 /// Metadata flag marking a message the session has finalized (folded). Finalized
 /// messages are pinned and never reprocessed by a later [`ContextSession::compact`].
@@ -126,13 +127,13 @@ impl ContextSession {
         // Mark this turn's fold replacements finalized. Finalized messages are
         // pinned and never reprocessed, so `result.folds` is exactly this turn's
         // new delta — append all of them (the ledger is append-only).
-        let new_folds = result.folds;
+        let mut new_folds = result.folds;
+        uniquify_fold_ids(&self.folds, &mut new_folds);
         for fold in &new_folds {
             if let Some(idx) = fold.replacement_index
                 && let Some(msg) = self.messages.get_mut(idx)
             {
-                msg.metadata
-                    .insert(SESSION_FINALIZED.to_string(), "true".to_string());
+                mark_finalized(msg);
             }
         }
         self.folds.extend(new_folds.iter().cloned());
@@ -169,6 +170,34 @@ impl ContextSession {
 
 fn is_finalized(message: &Message) -> bool {
     message.metadata.get(SESSION_FINALIZED).map(String::as_str) == Some("true")
+}
+
+fn mark_finalized(message: &mut Message) {
+    message
+        .metadata
+        .insert(SESSION_FINALIZED.to_string(), "true".to_string());
+    message
+        .metadata
+        .insert(meta_keys::PINNED.to_string(), "true".to_string());
+}
+
+fn uniquify_fold_ids(existing: &[FoldRecord], new_folds: &mut [FoldRecord]) {
+    let mut used: HashSet<String> = existing.iter().map(|fold| fold.id.clone()).collect();
+    for fold in new_folds {
+        if used.insert(fold.id.clone()) {
+            continue;
+        }
+        let base = fold.id.clone();
+        let mut suffix = 2usize;
+        loop {
+            let candidate = format!("{base}#{suffix}");
+            if used.insert(candidate.clone()) {
+                fold.id = candidate;
+                break;
+            }
+            suffix += 1;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -300,6 +329,13 @@ mod tests {
         s.compact().await.unwrap();
 
         // Snapshot the cleared stub + its id.
+        assert!(
+            s.messages().iter().any(|m| {
+                is_finalized(m)
+                    && m.metadata.get(meta_keys::PINNED).map(String::as_str) == Some("true")
+            }),
+            "newly finalized replacements must be pinned immediately"
+        );
         let cleared: Vec<_> = s
             .folds()
             .iter()
@@ -353,6 +389,18 @@ mod tests {
         assert_eq!(
             after_second, 2,
             "a second clear of identical content is its own ledger event"
+        );
+        let clear_ids: Vec<_> = s
+            .folds()
+            .iter()
+            .filter(|f| f.kind == FoldKind::Cleared)
+            .map(|f| f.id.clone())
+            .collect();
+        let unique_clear_ids: HashSet<_> = clear_ids.iter().cloned().collect();
+        assert_eq!(
+            unique_clear_ids.len(),
+            clear_ids.len(),
+            "session fold ids must stay unique even when CCR ids collide"
         );
         assert!(
             step.new_folds.iter().any(|f| f.kind == FoldKind::Cleared),

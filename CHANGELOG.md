@@ -86,6 +86,10 @@ versions may contain breaking changes).
   keeps its CCR id in the `Dropped` `FoldRecord` (the cascade threads the dropped
   stub through to fold-record building; `BudgetReport` gains a `dropped` field),
   so the audit pointer to the stored original is no longer orphaned.
+- Dropped fold records keep CCR provenance without counting removed stubs as
+  emitted replacement tokens, and `ContextSession` disambiguates repeated
+  content-addressed fold ids so its append-only ledger has stable unique event
+  references.
 - `compact_rich` now runs the agent/budget cascade on the verbatim conversation
   FIRST and block-compresses only the kept, non-protected messages afterward.
   This fixes two correctness bugs found by audit: (1) the cascade no longer
