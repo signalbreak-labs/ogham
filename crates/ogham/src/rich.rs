@@ -304,7 +304,7 @@ pub async fn compact_rich(
         dropped,
         counter.as_ref(),
     );
-    let cache_plan = apply_cache_policy(
+    let mut cache_plan = apply_cache_policy(
         &mut working,
         config.cache,
         model,
@@ -337,6 +337,12 @@ pub async fn compact_rich(
             fold.replacement_index.unwrap_or(usize::MAX),
         )
     });
+
+    // The cache plan's token accounting was computed on the flat projection,
+    // which under-counts opaque blocks and predates block compression. Recount
+    // the stable prefix against the ACTUAL emitted rich messages so `cacheable`
+    // and the threshold note describe the payload the provider really sees.
+    recount_rich_cache_plan(&mut cache_plan, &out, config.cache, model, counter.as_ref());
 
     // Fail-closed budget guard: the flat projection under-counts opaque blocks
     // (image bytes, tool inputs), so recount the ACTUAL emitted rich messages
@@ -475,6 +481,40 @@ fn block_compression_fold(
         ccr_id,
         marker: None,
         tags: crate::fold_tags::extract_fold_tags_rich(original),
+    }
+}
+
+/// Recompute the cache plan's stable-prefix token accounting against the final
+/// rich payload. Positional fields (`stable_prefix_messages`, annotations) are
+/// kept from the flat pass; only `stable_prefix_tokens`, `cacheable`, and the
+/// threshold note are corrected, using rich-aware token counting and the
+/// provider-/model-specific minimum.
+fn recount_rich_cache_plan(
+    plan: &mut CachePlan,
+    out: &[RichMessage],
+    policy: CachePolicy,
+    model: &str,
+    counter: &dyn TokenCounter,
+) {
+    let prefix_len = plan.stable_prefix_messages.min(out.len());
+    let tokens: usize = out[..prefix_len]
+        .iter()
+        .map(|m| rich_message_tokens(m, counter))
+        .sum();
+    let min_cacheable = match policy {
+        CachePolicy::Anthropic { .. } => {
+            crate::providers::anthropic::min_cacheable_prefix_tokens(model)
+        }
+        _ => crate::providers::openai::MIN_CACHEABLE_PREFIX_TOKENS,
+    };
+    plan.stable_prefix_tokens = tokens;
+    plan.cacheable = tokens >= min_cacheable;
+    // Refresh the threshold note (if any) to match the recounted tokens.
+    plan.notes.retain(|n| !n.contains("stable prefix is"));
+    if plan.stable_suffix_messages > 0 && prefix_len > 0 && !plan.cacheable {
+        plan.notes.push(format!(
+            "stable prefix is {tokens} tokens; provider prompt caching typically engages around {min_cacheable}+"
+        ));
     }
 }
 

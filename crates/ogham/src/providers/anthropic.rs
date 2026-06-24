@@ -13,6 +13,7 @@
 use crate::agent::AgentPolicy;
 use ogham_core::{ContentBlock, ImageSource, Message, MessageContent, RichMessage, meta_keys};
 use serde_json::{Value, json};
+use std::collections::HashSet;
 
 /// Value for the `anthropic-beta` request header that enables context editing.
 pub const BETA_HEADER: &str = "context-management-2025-06-27";
@@ -147,6 +148,10 @@ pub fn render_cache_control(messages: &[Message]) -> AnthropicMessages {
 pub fn render_cache_control_rich(messages: &[RichMessage]) -> AnthropicMessages {
     let mut system = Vec::new();
     let mut turns = Vec::new();
+    // Native `tool_use` ids emitted so far. A `tool_result` whose id is not here
+    // is an orphan (its `tool_use` was folded away); Anthropic rejects an
+    // out-of-sequence tool result, so it is demoted to text instead.
+    let mut seen_tool_use: HashSet<String> = HashSet::new();
     for m in messages {
         // Anthropic role: system goes to the top-level field; assistant stays
         // assistant; everything else (incl. `tool`) is a user turn. Blocks are
@@ -157,7 +162,7 @@ pub fn render_cache_control_rich(messages: &[RichMessage]) -> AnthropicMessages 
             "assistant" => "assistant",
             _ => "user",
         };
-        let mut blocks = render_message_content(&m.content, role);
+        let mut blocks = render_message_content(&m.content, role, &mut seen_tool_use);
         if blocks.is_empty() {
             continue;
         }
@@ -178,21 +183,41 @@ pub fn render_cache_control_rich(messages: &[RichMessage]) -> AnthropicMessages 
     }
 }
 
-fn render_message_content(content: &MessageContent, role: &str) -> Vec<Value> {
+fn render_message_content(
+    content: &MessageContent,
+    role: &str,
+    seen_tool_use: &mut HashSet<String>,
+) -> Vec<Value> {
     match content {
         MessageContent::Text(text) => vec![json!({ "type": "text", "text": text })],
-        MessageContent::Blocks(blocks) => blocks
-            .iter()
-            .map(|b| render_block_in_role(b, role))
-            .collect(),
+        MessageContent::Blocks(blocks) => {
+            let mut out = Vec::with_capacity(blocks.len());
+            for block in blocks {
+                out.push(render_block_in_role(block, role, seen_tool_use));
+                // Record native tool_use ids so a later user turn's tool_result
+                // can be matched to a surviving tool_use.
+                if role == "assistant"
+                    && let ContentBlock::ToolUse { id, .. } = block
+                {
+                    seen_tool_use.insert(id.clone());
+                }
+            }
+            out
+        }
     }
 }
 
-/// Render a top-level block, enforcing Anthropic's role rules: `tool_use` is
-/// valid only in an assistant turn and `tool_result` only in a user turn. A
-/// block that is invalid for `role` is linearized to a `text` block so the
-/// request stays valid regardless of how the host labeled the message.
-fn render_block_in_role(block: &ContentBlock, role: &str) -> Value {
+/// Render a top-level block, enforcing Anthropic's role + sequencing rules:
+/// `tool_use` is valid only in an assistant turn, `tool_result` only in a user
+/// turn, and a `tool_result` is valid only when a preceding `tool_use` with its
+/// id survived. A block that violates these is linearized to a `text` block
+/// (preserving its content) so the request stays valid however the host labeled
+/// the message.
+fn render_block_in_role(
+    block: &ContentBlock,
+    role: &str,
+    seen_tool_use: &HashSet<String>,
+) -> Value {
     match block {
         ContentBlock::ToolUse { id, name, .. } if role != "assistant" => {
             json!({ "type": "text", "text": format!("[tool_use {name} ({id})]") })
@@ -200,7 +225,43 @@ fn render_block_in_role(block: &ContentBlock, role: &str) -> Value {
         ContentBlock::ToolResult { tool_use_id, .. } if role != "user" => {
             json!({ "type": "text", "text": format!("[tool_result for {tool_use_id}]") })
         }
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            ..
+        } if !seen_tool_use.contains(tool_use_id) => {
+            // Orphan tool_result: preserve its content as text rather than emit
+            // an out-of-sequence native tool_result.
+            json!({
+                "type": "text",
+                "text": format!("[tool_result for {tool_use_id}]{}", tool_result_text(content)),
+            })
+        }
         _ => render_block(block),
+    }
+}
+
+/// Flatten a tool_result's nested content to a readable text suffix for the
+/// orphan-demotion path. Empty content yields an empty string.
+fn tool_result_text(content: &[ContentBlock]) -> String {
+    let parts: Vec<String> = content
+        .iter()
+        .map(|b| match b {
+            ContentBlock::Text { text } | ContentBlock::Thinking { text } => text.clone(),
+            ContentBlock::Image { .. } => "[image]".to_string(),
+            ContentBlock::Reference {
+                kind, id_or_path, ..
+            } => format!("[{kind}: {id_or_path}]"),
+            ContentBlock::ToolUse { id, name, .. } => format!("[tool_use {name} ({id})]"),
+            ContentBlock::ToolResult { tool_use_id, .. } => {
+                format!("[tool_result for {tool_use_id}]")
+            }
+        })
+        .collect();
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", parts.join(" "))
     }
 }
 
@@ -453,6 +514,15 @@ mod tests {
     fn tool_result_linearizes_provider_invalid_nested_blocks() {
         // A tool_result whose nested content includes blocks Anthropic does not
         // allow there (tool_use, nested tool_result) must not emit them verbatim.
+        // A preceding assistant tool_use keeps the outer result in-sequence.
+        let assistant = RichMessage::blocks(
+            "assistant",
+            vec![ContentBlock::ToolUse {
+                id: "call_1".into(),
+                name: "shell".into(),
+                input: json!({}),
+            }],
+        );
         let tool = RichMessage::blocks(
             "tool",
             vec![ContentBlock::ToolResult {
@@ -479,8 +549,8 @@ mod tests {
                 ],
             }],
         );
-        let rendered = render_cache_control_rich(&[tool]);
-        let nested = &rendered.messages[0]["content"][0]["content"];
+        let rendered = render_cache_control_rich(&[assistant, tool]);
+        let nested = &rendered.messages[1]["content"][0]["content"];
         // Only text and image survive as native shapes; tool_use/tool_result
         // are linearized to text.
         assert_eq!(nested[0]["type"], "text");
@@ -496,6 +566,34 @@ mod tests {
             blocks
                 .iter()
                 .all(|b| b["type"] == "text" || b["type"] == "image")
+        );
+    }
+
+    #[test]
+    fn orphan_tool_result_is_demoted_to_text() {
+        // A tool_result whose tool_use was folded away (no preceding tool_use)
+        // must not emit an out-of-sequence native tool_result.
+        let tool = RichMessage::blocks(
+            "tool",
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "gone".into(),
+                is_error: true,
+                content: vec![ContentBlock::Text {
+                    text: "build failed".into(),
+                }],
+            }],
+        );
+        let rendered = render_cache_control_rich(&[tool]);
+        let block = &rendered.messages[0]["content"][0];
+        assert_eq!(block["type"], "text", "orphan result must not be native");
+        assert_eq!(block["text"], "[tool_result for gone]: build failed");
+        // No native tool_result anywhere.
+        assert!(
+            rendered.messages[0]["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|b| b["type"] != "tool_result")
         );
     }
 
