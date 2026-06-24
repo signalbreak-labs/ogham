@@ -7,6 +7,8 @@ versions may contain breaking changes).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-24
+
 ### Added
 
 - Native binary CCR payload storage in the persistent backends, for *binary*
@@ -19,22 +21,6 @@ versions may contain breaking changes).
   envelope. Reads fail closed: a binary payload fetched through the text
   `retrieve()` API, a corrupt native frame, or a SQLite read/metadata error all
   return `StoreError` rather than silently empty or lossy content.
-
-### Changed
-
-- `CachePolicy::Gemini` is now first-class in the integrated `CachePlan` instead
-  of emitting a generic plan plus a warning. The plan is content-keyed (no inline
-  `cache_control` breakpoints, matching Gemini's `CachedContent` model),
-  thresholded by `providers::gemini::MIN_CACHEABLE_PREFIX_TOKENS`, and carries
-  Gemini-specific notes (model-dependent minimums; refresh the `CachedContent`
-  when `content_key` changes). The misleading "generic stable-prefix plan only"
-  warning is gone. (`apply_cache_policy` dropped its now-unused `warnings`
-  parameter.)
-
-## [0.4.0] - 2026-06-23
-
-### Added
-
 - Richer Anthropic rendering: `providers::anthropic::render_cache_control_rich`
   renders block-structured `RichMessage`s into native Anthropic content blocks
   — `text`, `tool_use`, `tool_result` (with nested content rendered
@@ -170,6 +156,14 @@ versions may contain breaking changes).
 
 ### Changed
 
+- `CachePolicy::Gemini` is now first-class in the integrated `CachePlan` instead
+  of emitting a generic plan plus a warning. The plan is content-keyed (no inline
+  `cache_control` breakpoints, matching Gemini's `CachedContent` model),
+  thresholded by `providers::gemini::MIN_CACHEABLE_PREFIX_TOKENS`, and carries
+  Gemini-specific notes (model-dependent minimums; refresh the `CachedContent`
+  when `content_key` changes). The misleading "generic stable-prefix plan only"
+  warning is gone. (`apply_cache_policy` dropped its now-unused `warnings`
+  parameter.)
 - **BREAKING (0.4):** the `ccr-sqlite` and `ccr-fjall` features are no longer in
   the default set, so the default `ogham` build is lean — in-memory CCR only, no
   `rusqlite`/`fjall`. A consumer that uses `CompressConfig::ccr_store_path`, or
