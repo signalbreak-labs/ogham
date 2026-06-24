@@ -23,23 +23,34 @@ is a deterministic library call.
 | Capability | In one line |
 |---|---|
 | **Content compression** | detects JSON / logs / code / diffs / prose and routes each to a purpose-built compressor |
-| **Reversible by default** | originals live in a CCR store (in-memory, SQLite, fjall); compressed text carries `<<ccr:HASH>>` markers the model can dereference |
+| **Reversible by default** | originals live in a CCR store (in-memory by default; SQLite / fjall behind feature flags); compressed text carries `<<ccr:HASH>>` markers the model can dereference |
 | **Agent-aware rules** | clears stale successful tool results to one-line stubs; **never** touches errors, system prompts, the latest user query, or pinned messages |
 | **Token budgets** | a degradation cascade (compress → summarize → drop) that fits any history into a limit — or refuses with `BudgetExceeded` rather than overflow |
 | **Fold records** | `compact_conversation()` returns auditable records for cleared, compressed, summarized, and dropped spans so hosts do not scrape marker strings |
+| **Stateful sessions** | `ContextSession` compacts append-only — push turns, compact only the active tail, freeze already-folded messages; work scales with new content, not history length |
+| **Rich (block) content** | `compact_rich()` runs the cascade over block-structured `RichMessage`s, keeping tool calls / images / references structured instead of flattened to a JSON string |
+| **Searchable memory** | folded content is indexed (deterministic BM25) and tagged (`tool_names` / `error_classes` / `file_paths`), so a host can recall folds by relevance or typed field — not just by exact id |
+| **Provider cache planning** | provider-shaped plans for OpenAI / Gemini / Anthropic (stable prefixes, content keys, native Anthropic block rendering with per-model thresholds); Ogham plans, the host calls |
 | **Honest token counting** | exact for OpenAI encodings (`tiktoken` feature); calibrated estimates with an explicit safety margin elsewhere — Claude tokenizers aren't public and Ogham doesn't pretend otherwise |
 | **Structured summaries** | deterministic extraction of files / decisions / errors / next-steps, plus a `Summarizer` trait for LLM-backed memory |
-| **Prompt-cache support** | byte-stable prefixes + provider breakpoint annotation for KV-cache reuse |
 | **Observable** | every decision streams through `Observer`/`Metrics` traits — auditable, testable |
 
 ## Install
 
 ```toml
 [dependencies]
+# Lean by default: in-memory CCR only, no heavy embedded backends.
 ogham = "0.4"
-# exact OpenAI token counting:
-# ogham = { version = "0.4", features = ["tiktoken"] }
+
+# Opt into what you need:
+# ogham = { version = "0.4", features = ["ccr-sqlite"] }  # persistent SQLite store
+# ogham = { version = "0.4", features = ["ccr-fjall"] }   # embedded LSM store
+# ogham = { version = "0.4", features = ["tiktoken"] }    # exact OpenAI token counts
 ```
+
+> **0.4 is breaking:** the `ccr-sqlite` / `ccr-fjall` backends moved out of the
+> default feature set, so the default build is lean. Add the feature to keep a
+> persistent store. See [CHANGELOG.md](CHANGELOG.md).
 
 Prebuilt `ogham-server` binaries (Linux, macOS universal, Windows; sha256 checksums) are on the
 [releases page](https://github.com/signalbreak-labs/ogham/releases).
@@ -88,6 +99,29 @@ let result = compact_conversation(messages, CompactConfig {
 
 for fold in &result.folds {
     println!("record fold {} covering {:?}", fold.id, fold.original_range);
+}
+```
+
+**Compact incrementally across turns** (stateful — the agent-runtime path):
+
+```rust
+use ogham::{ContextSession, SessionConfig, Message};
+
+let mut session = ContextSession::new(SessionConfig {
+    budget: Some(/* ContextBudget */),
+    ..Default::default()
+});
+
+loop {
+    session.push(Message::new("user", next_user_turn));
+    let step = session.compact().await?;     // folds only the active tail
+    let prompt = session.messages();         // send this to the model
+    // ... model call, then push the assistant/tool turns and repeat ...
+
+    // Recall a folded original later — by relevance or typed tag:
+    for hit in session.recall().search("auth error in login.rs", 3) {
+        let original = session.retrieve(&hit.ccr_id).await?;
+    }
 }
 ```
 

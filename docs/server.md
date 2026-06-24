@@ -35,6 +35,10 @@ exposing it beyond localhost.
 
 ## Embedding in your Axum app
 
+`ogham-server` enables both persistent CCR backends (`ccr-sqlite`, `ccr-fjall`),
+so the store types below are available when you depend on the server crate. If
+you reference `ogham` directly instead, add the matching feature.
+
 ```rust
 use ogham_server::{app_with_state, AppState};
 use ogham::ccr::fjall::FjallCcrStore;

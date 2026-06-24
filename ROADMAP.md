@@ -74,10 +74,31 @@ The safety and honesty foundation is in place:
   exact-id-only gap in reversible CCR. `ContextSession` maintains one
   automatically (index on fold, drop on GC). Pure and deterministic: no
   embeddings, no network.
+- **Structured fold tags.** Every `FoldRecord` carries a deterministic
+  `FoldTags { tool_names, error_classes, file_paths }` extracted offline during
+  compaction, and `RecallIndex::find_by_tag` filters folds by typed field — so a
+  host can fetch "all folds from the `shell` tool" or "all folds with a `panic`"
+  without a free-text query.
+- **Block-aware rich content.** `ogham_core::content` defines a host-neutral
+  block-structured `RichMessage`; `ogham::compact_rich` runs the agent/budget
+  cascade over rich messages with structure preserved for kept messages and
+  reversible flat text for folded ones — so a host never flattens tool calls,
+  images, or references to a JSON string.
+- **Provider cache planning.** `providers::{openai, gemini, anthropic}` emit
+  provider-shaped cache plans (stable-prefix reports, content-keyed candidates,
+  native Anthropic block rendering with per-model thresholds); Ogham emits the
+  plan, the host owns the HTTP call.
+- **Lean dependency footprint.** The default build is in-memory CCR only; the
+  persistent SQLite/fjall backends are opt-in features and store binary CCR
+  payloads natively (no hex envelope), a CI guard keeps the default tree lean.
 
 ## Roadmap
 
-### Near-term: correctness and dependency hygiene
+Status legend: **Done** items have shipped (see `CHANGELOG.md`); **Planned**
+items are not yet implemented. Everything in the near- and mid-term tiers below
+is done; the longer-term tier is the remaining (optional) work.
+
+### ✅ Near-term: correctness and dependency hygiene — done
 
 - **Slim the default feature set.** Done (0.4, breaking). `ccr-sqlite`
   (`rusqlite`) and `ccr-fjall` (`fjall`) are no longer in the default set, so the
@@ -95,7 +116,7 @@ The safety and honesty foundation is in place:
   un-deduplicated). Protected content is still never overridden, and an
   empty/noise-only hint is byte-identical to the no-hint path.
 
-### Mid-term: richer host content and provider planning
+### ✅ Mid-term: richer host content and provider planning — done
 
 - **Host-neutral rich content model.** Done. `ogham_core::content` defines a
   block-structured `RichMessage` (text / thinking / image / tool-use /
@@ -117,7 +138,7 @@ The safety and honesty foundation is in place:
   their real size. Both native backends fall back to the shared text decoder for
   plain `save`s and legacy envelopes, so existing stores keep working
   (a re-open runs an idempotent column migration).
-- **Provider cache planning.** Shipped: OpenAI stable-prefix reports
+- **Provider cache planning.** Done. OpenAI stable-prefix reports
   (`providers::openai`), Gemini cache candidates (`providers::gemini`), an
   Anthropic `cache_control` request renderer (`providers::anthropic`), and
   stable-prefix accounting folded into `CompactResult`'s `CachePlan`.
@@ -136,23 +157,24 @@ The safety and honesty foundation is in place:
   prefix). Possible follow-up: a `CountedTokens { tokens, kind }` return type for
   per-count provenance.
 
-### Longer-term: optional power features
+### ⬜ Longer-term: optional power features — planned (not yet implemented)
 
-- **Selective structured encodings.** Keep TOON-style encodings optional and
-  content-type gated; apply only to uniform arrays after validation, always
-  preserving the CCR original and benchmarking against tokenizer counts rather
-  than byte length.
-- **Model-assisted compression boundary.** Define a `ModelAssistedCompressor`
-  trait / feature boundary for aggressive (e.g. LLMLingua-style) compression so
-  the default path stays deterministic and zero-network. Require evaluation gates
-  before enabling semantic token dropping on tool, error, or system content.
-- **Retrieval-friendly metadata.** A deterministic BM25 recall index over folded
-  content has shipped (`ogham::recall`), and its `extract_terms` already splits
-  out file paths, identifiers, and symbol-like tokens. The remaining work is
-  structured tagging — attaching explicit file paths, command/tool names, and
-  error classes to fold records and summaries — so host retrieval/memory systems
-  can index on typed fields, not just free-text terms. Ogham integrates with
-  retrieval; it does not become a vector database.
+- **Planned — selective structured encodings.** Wire the existing (registered
+  but not default-routed) TOON encoder into content-type-gated selective use:
+  apply only to uniform arrays after validation, always preserving the CCR
+  original and benchmarking against tokenizer counts rather than byte length.
+- **Planned — model-assisted compression boundary.** Define a
+  `ModelAssistedCompressor` trait / feature boundary for aggressive (e.g.
+  LLMLingua-style) compression so the default path stays deterministic and
+  zero-network. Require evaluation gates before enabling semantic token dropping
+  on tool, error, or system content.
+- **Retrieval-friendly metadata.** Largely done. A deterministic BM25 recall
+  index (`ogham::recall`) and structured fold tags (`ogham::fold_tags`:
+  `tool_names` / `error_classes` / `file_paths`, queryable via
+  `RecallIndex::find_by_tag`) have shipped. *Planned remainder:* broaden typed
+  tagging to summaries and add more categories (e.g. symbol identifiers) as
+  evaluation shows they help. Ogham integrates with retrieval; it does not
+  become a vector database.
 
 ## Context landscape
 

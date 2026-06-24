@@ -23,17 +23,33 @@
 //! ```
 //!
 //! **Conversation level** — agent-aware rules and token budgets over a
-//! whole message history. The canonical order is:
+//! whole message history. Most hosts use one of three unified entry
+//! points, each running the cascade and returning auditable records:
 //!
-//! 1. [`agent::apply_agent_compression`] — clear stale successful tool
-//!    results to retrievable CCR markers; never touch errors, system
-//!    prompts, or the latest user query.
-//! 2. [`budget::enforce_budget`] — escalate through compression,
-//!    summarization, and dropping until the history fits a token
-//!    budget, or fail closed with [`OghamError::BudgetExceeded`].
-//! 3. [`cache_aligner::align_messages`] +
-//!    [`cache_strategy::apply_cache_strategy`] — stabilize bytes and
-//!    annotate provider cache breakpoints.
+//! - [`compact_conversation`] — one-shot compaction of a flat
+//!   `Vec<Message>` → [`CompactResult`] (fold records, protected report,
+//!   budget/agent reports, cache plan, warnings).
+//! - [`compact_rich`] — the block-aware analogue over [`RichMessage`]s:
+//!   tool calls, images, and references stay structured instead of
+//!   flattened to a JSON string.
+//! - [`session::ContextSession`] — stateful, incremental compaction:
+//!   push turns, compact only the active tail, freeze already-folded
+//!   messages, with a searchable [`recall`] index over folded content.
+//!
+//! Under the hood the canonical pass order is
+//! [`agent::apply_agent_compression`] (clear stale successful tool
+//! results to retrievable CCR markers; never touch errors, system
+//! prompts, or the latest user query) → [`budget::enforce_budget`]
+//! (escalate through compression, summarization, and dropping until the
+//! history fits, or fail closed with [`OghamError::BudgetExceeded`]) →
+//! [`cache_aligner::align_messages`] +
+//! [`cache_strategy::apply_cache_strategy`] (stabilize bytes and annotate
+//! provider cache breakpoints). Compose them directly for full control.
+//!
+//! Folded content stays addressable: [`recall::RecallIndex`] is a
+//! deterministic BM25 index over it, and every [`FoldRecord`] carries
+//! typed [`fold_tags::FoldTags`] (tool names, error classes, file paths).
+//! Provider cache plans live in [`providers`].
 //!
 //! ## Guarantees
 //!
@@ -41,8 +57,8 @@
 //!   unchanged; oversized prompts return an error instead of being sent.
 //! - **Deterministic:** same input + config ⇒ byte-identical output.
 //! - **Reversible by default:** originals are stored in a [`ccr`] store
-//!   (in-memory, SQLite, or fjall) and retrievable via
-//!   `<<ccr:HASH>>` markers.
+//!   (in-memory by default; SQLite or fjall behind feature flags) and
+//!   retrievable via `<<ccr:HASH>>` markers.
 //! - **Honest token counting:** exact for OpenAI encodings with the
 //!   `tiktoken` feature; calibrated estimates with an explicit safety
 //!   margin otherwise (Claude tokenizers are not public).
