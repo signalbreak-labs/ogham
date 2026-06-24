@@ -14,6 +14,14 @@ versions may contain breaking changes).
   `TokenCounter::count_kind()` default method, so a counter declares how its
   counts are produced. `HeuristicCounter` and the tiktoken counter report their
   method and recommended safety margin.
+- `compact_rich()` plus `CompactRichConfig`/`CompactRichResult`: the block-aware
+  analogue of `compact_conversation()`. It runs block-aware text compression and
+  then the agent/budget cascade over `Vec<RichMessage>`, returning
+  structure-preserving output — messages the cascade keeps retain their tool ids
+  and non-text blocks; messages it folds become reversible flat text — plus fold
+  records, protected-tail evidence, optional budget/agent reports, and a cache
+  plan. Kept block-compressed messages restore to exact blocks via
+  `restore_rich_message`.
 - `ogham::rich`: block-aware compression. `compress_rich_messages()` compresses
   the bulky text *inside* `RichMessage` blocks (routing each text payload through
   the content-type compressors) while preserving tool-call ids, non-text blocks

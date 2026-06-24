@@ -7,7 +7,7 @@ use ogham_core::{Message, Result, TokenCounter, meta_keys};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-const ORIGINAL_INDEX_KEY: &str = "ogham.compact.original_index";
+pub(crate) const ORIGINAL_INDEX_KEY: &str = "ogham.compact.original_index";
 
 /// Compression behavior used by `compact_conversation`.
 #[derive(Debug, Clone)]
@@ -223,7 +223,7 @@ pub async fn compact_conversation(
     })
 }
 
-fn protected_report(
+pub(crate) fn protected_report(
     messages: &[Message],
     policy: &AgentPolicy,
     counter: &dyn TokenCounter,
@@ -244,7 +244,7 @@ fn protected_report(
     }
 }
 
-fn tag_original_indices(messages: &mut [Message]) -> Vec<Option<String>> {
+pub(crate) fn tag_original_indices(messages: &mut [Message]) -> Vec<Option<String>> {
     let mut saved = Vec::with_capacity(messages.len());
     for (idx, msg) in messages.iter_mut().enumerate() {
         saved.push(
@@ -279,7 +279,7 @@ fn restore_internal_index(
     original_index
 }
 
-fn build_fold_records(
+pub(crate) fn build_fold_records(
     original: &[Message],
     compacted: &mut [Message],
     saved_internal_values: &[Option<String>],
@@ -442,7 +442,7 @@ fn extract_ccr_marker(content: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
-fn apply_cache_policy(
+pub(crate) fn apply_cache_policy(
     messages: &mut [Message],
     policy: CachePolicy,
     counter: &dyn TokenCounter,

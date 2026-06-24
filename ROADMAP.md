@@ -86,9 +86,11 @@ The safety and honesty foundation is in place:
   explicit marked lossy flattening to the text `Message`; and
   `ogham::rich::compress_rich_messages` compresses the text *inside* blocks while
   preserving tool ids and non-text blocks, with message-level reversible undo, so
-  hosts no longer flatten to a JSON string at all. Possible follow-up: fold
-  block-aware compaction into a single `compact_rich` entry point alongside the
-  budget cascade and fold records.
+  hosts no longer flatten to a JSON string at all. `ogham::compact_rich` is the
+  high-level entry point: it folds block-aware compaction into the agent/budget
+  cascade and returns the same audit records (fold records, protected report,
+  cache plan) as `compact_conversation`, with structure preserved for kept
+  messages and reversible flat text for folded ones.
 - **Block-aware CCR payloads.** Shipped: `ccr::CcrPayload` plus
   `CcrStore::save_payload` / `retrieve_payload` (default methods over the
   existing text store), so a host can store and restore exact structured

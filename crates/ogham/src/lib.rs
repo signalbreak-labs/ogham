@@ -178,7 +178,10 @@ pub use compact::{
     CachePlan, CachePolicy, CcrPolicy, CompactConfig, CompactResult, CompressionPolicy, FoldKind,
     FoldRecord, ProtectedReport, compact_conversation,
 };
-pub use rich::{RichCompressionPolicy, compress_rich_messages, restore_rich_message};
+pub use rich::{
+    CompactRichConfig, CompactRichResult, RichCompressionPolicy, compact_rich,
+    compress_rich_messages, restore_rich_message,
+};
 
 /// Detect the content type of a string.
 pub fn detect(content: &str) -> crate::detect::DetectionResult {
