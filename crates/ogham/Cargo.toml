@@ -38,12 +38,12 @@ blake3 = "1"
 regex = "1"
 md5 = "0.8"
 flate2 = "1"
-fjall = { version = "2", optional = true }
+fjall = { version = "3", optional = true }
 rusqlite = { version = ">=0.38, <0.41", features = ["bundled"], optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
-criterion = { version = "0.7", default-features = false }
+criterion = { version = "0.8", default-features = false }
 
 [[bench]]
 name = "compress"
